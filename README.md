@@ -5,9 +5,11 @@ documentary about you — hybrid human-animal portrait plus a dramatic
 British-documentary voiceover, all inside one Telegram conversation.
 The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 
-> **Status: Phase 1 — Repository & gateway.** The bot boots, long-polls
-> Telegram, and answers every incoming message with a hardcoded friendly
-> reply. The pipeline stages below arrive in later phases
+> **Status: Phase 2 — Bouncer.** The bot boots, long-polls Telegram, and
+> gates every conversation on a portrait photo: a Gemini vision verdict
+> accepts a solo real human (storing the photo and advancing the session) or
+> rejects everything else with a content-specific, in-character quip. The
+> remaining pipeline stages arrive in later phases
 > ([`SPECS/ROADMAP.md`](SPECS/ROADMAP.md)).
 
 ## Pipeline (target architecture)
@@ -43,7 +45,7 @@ Environment variables (loaded from `.env`; never committed, never logged):
 | Variable | Purpose |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | **Required.** Token from [@BotFather](https://t.me/BotFather). Startup fails loudly with a clear log if it is missing or empty. |
-| `GEMINI_API_KEY` | Loaded from `.env` from day one; required from Phase 2 (Bouncer) onward, optional for Phase 1. |
+| `GEMINI_API_KEY` | **Required.** Key from [Google AI Studio](https://aistudio.google.com/apikey); the Bouncer calls Gemini vision on every photo. Startup fails loudly if it is missing or empty. |
 
 ## Run the bot
 
@@ -51,9 +53,12 @@ Environment variables (loaded from `.env`; never committed, never logged):
 python -m telegram_documentaries
 ```
 
-It long-polls Telegram (`getUpdates`) and replies to any incoming message with
-the Phase 1 hardcoded greeting. Shut down gracefully with **Ctrl+C** or
-**SIGTERM** — even while a long poll is in flight.
+It long-polls Telegram (`getUpdates`) and runs the Bouncer: any text or
+non-photo input gets an in-character nudge to send a photograph; a photo is
+judged by Gemini (accept → photo stored under `.tmp/` and the session
+advances; reject → a specific in-character quip and a clean retry). Shut
+down gracefully with **Ctrl+C** or **SIGTERM** — even while a long poll is
+in flight.
 
 ## Development scripts
 
@@ -107,8 +112,10 @@ scripts/test
 ```
 src/telegram_documentaries/
   config.py        # .env loading, Settings, secret-redacting log filter
-  models.py        # typed Pydantic models for Telegram updates (boundaries)
-  bot_gateway.py   # entry point: long-polling loop, echo reply, shutdown
+  models.py        # typed Pydantic models (phases, verdicts, Telegram updates)
+  bouncer.py       # Gemini vision client: photo → structured accept/reject verdict
+  logging_utils.py # async-call timing + phase-transition log helpers
+  bot_gateway.py   # entry point: long-polling loop, photo flow, shutdown
   __main__.py      # python -m telegram_documentaries
 tests/unit/        # Red/Green test suite
 scripts/           # dev scripts: test, hooks (ground truth, see TECH.md)

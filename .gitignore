@@ -20,6 +20,9 @@ dist/
 .ruff_cache/
 .pytest_cache/
 
+# Runtime media storage (user photos - never committed)
+.tmp/
+
 # IDE / tooling
 .opencode/node_modules/
 

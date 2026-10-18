@@ -121,6 +121,9 @@ class TestGetUpdates:
             )
 
         client = make_client(handler)
+        # Mirror production: run_bot installs the redaction filter on root
+        # handlers before any polling (config.install_secret_redaction).
+        bot_gateway.install_secret_redaction(PLACEHOLDER_TOKEN)
         with caplog.at_level(logging.DEBUG):
             with pytest.raises(bot_gateway.TelegramApiError) as exc_info:
                 await client.get_updates()
@@ -202,3 +205,90 @@ class TestSendMessage:
         assert seen[0].method == "POST"
         assert seen[0].url.path == f"/bot{PLACEHOLDER_TOKEN}/sendMessage"
         assert json.loads(seen[0].content) == {"chat_id": 555, "text": "Hello back"}
+
+
+class TestDownloadFile:
+    @pytest.mark.asyncio
+    async def test_resolves_file_path_then_downloads_bytes(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            if request.url.path.endswith("/getFile"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "result": {
+                            "file_id": "f1",
+                            "file_unique_id": "u1",
+                            "file_size": 1024,
+                            "file_path": "photos/file_42.jpg",
+                        },
+                    },
+                )
+            return httpx.Response(200, content=b"\xff\xd8JPEG-BYTES")
+
+        client = make_client(handler)
+        try:
+            data = await client.download_file("f1")
+        finally:
+            await client.close()
+
+        assert data == b"\xff\xd8JPEG-BYTES"
+        assert seen[0].url.path == f"/bot{PLACEHOLDER_TOKEN}/getFile"
+        assert seen[0].url.params["file_id"] == "f1"
+        assert seen[1].url.path == f"/file/bot{PLACEHOLDER_TOKEN}/photos/file_42.jpg"
+
+    @pytest.mark.asyncio
+    async def test_unexpected_getfile_shape_raises_loudly(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "result": {"file_id": "f1"}})
+
+        client = make_client(handler)
+        with pytest.raises(bot_gateway.TelegramApiError, match="file_path"):
+            await client.download_file("f1")
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_getfile_http_error_raises_without_leaking_token(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"ok": False, "description": "bad file"})
+
+        client = make_client(handler)
+        with pytest.raises(bot_gateway.TelegramApiError) as exc_info:
+            await client.download_file("f1")
+        await client.close()
+
+        assert PLACEHOLDER_TOKEN not in str(exc_info.value)
+        assert "400" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_file_download_transport_error_raises_typed_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/getFile"):
+                return httpx.Response(
+                    200,
+                    json={"ok": True, "result": {"file_path": "photos/x.jpg"}},
+                )
+            raise httpx.ReadTimeout("download timed out")
+
+        client = make_client(handler)
+        with pytest.raises(bot_gateway.TelegramApiError, match="ReadTimeout"):
+            await client.download_file("f1")
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_file_download_http_error_raises_typed_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/getFile"):
+                return httpx.Response(
+                    200,
+                    json={"ok": True, "result": {"file_path": "photos/x.jpg"}},
+                )
+            return httpx.Response(403, json={"ok": False})
+
+        client = make_client(handler)
+        with pytest.raises(bot_gateway.TelegramApiError, match="403"):
+            await client.download_file("f1")
+        await client.close()

@@ -18,9 +18,10 @@ from pydantic import ValidationError
 
 from telegram_documentaries import bot_gateway
 from telegram_documentaries.config import ConfigError
-from telegram_documentaries.models import Update, UpdateResult
+from telegram_documentaries.models import Phase, SessionState, Update, UpdateResult
 
 PLACEHOLDER_TOKEN = "123456:PLACEHOLDER-TELEGRAM-BOT-TOKEN"
+PLACEHOLDER_GEMINI_KEY = "PLACEHOLDER-GEMINI-API-KEY"
 
 SignalRegistration = list[tuple[signal.Signals, Callable[[], None]]]
 
@@ -28,6 +29,7 @@ SignalRegistration = list[tuple[signal.Signals, Callable[[], None]]]
 def make_settings() -> MagicMock:
     settings = MagicMock()
     settings.telegram_bot_token = PLACEHOLDER_TOKEN
+    settings.gemini_api_key = PLACEHOLDER_GEMINI_KEY
     return settings
 
 
@@ -65,15 +67,17 @@ def inert_signal_handlers(
 
 
 class TestBuildReply:
-    def test_builds_hardcoded_greeting_for_text_message(self) -> None:
+    def test_text_at_awaiting_photo_gets_the_photo_nudge(self) -> None:
         update = text_update(1, 12345, text="Hi bot")
+        assert update.message is not None
 
-        reply = bot_gateway.build_reply(update)
+        reply = bot_gateway.build_reply(update.message, SessionState(chat_id=12345))
 
-        assert "Hello!" in reply
-        assert "message" in reply or "photo" in reply or "gateway" in reply
+        assert reply == bot_gateway.PHOTO_NUDGE
+        assert "photograph" in reply.lower()
+        assert "Phase 1" not in reply
 
-    def test_builds_hardcoded_greeting_for_photo_message(self) -> None:
+    def test_photo_message_is_left_to_the_bouncer(self) -> None:
         update = Update.model_validate(
             {
                 "update_id": 2,
@@ -93,18 +97,21 @@ class TestBuildReply:
                 },
             }
         )
+        assert update.message is not None
 
-        reply = bot_gateway.build_reply(update)
+        reply = bot_gateway.build_reply(update.message, SessionState(chat_id=12345))
 
-        assert isinstance(reply, str)
-        assert len(reply) > 0
+        # None = "the bouncer flow handles this message", not a plain reply.
+        assert reply is None
 
-    def test_returns_default_greeting_for_update_with_no_message(self) -> None:
-        update = Update.model_validate({"update_id": 3})
+    def test_input_after_the_bouncer_gets_a_holding_reply(self) -> None:
+        update = text_update(3, 777, text="more questions?")
+        assert update.message is not None
+        session = SessionState(chat_id=777, phase=Phase.AWAITING_INTERVIEW)
 
-        reply = bot_gateway.build_reply(update)
+        reply = bot_gateway.build_reply(update.message, session)
 
-        assert reply.startswith("Hello!") or "greeting" in reply.lower()
+        assert reply == bot_gateway.LATER_PHASE_REPLY
 
 
 class TestRunBotMissingToken:
@@ -141,7 +148,7 @@ class TestRunBotBasicFlow:
         mock_client.send_message.assert_awaited_once()
         kwargs = mock_client.send_message.await_args.kwargs
         assert kwargs["chat_id"] == 555
-        assert kwargs["text"] == bot_gateway.build_reply(update)
+        assert kwargs["text"] == bot_gateway.PHOTO_NUDGE
         mock_client.close.assert_awaited_once()
 
     @pytest.mark.asyncio

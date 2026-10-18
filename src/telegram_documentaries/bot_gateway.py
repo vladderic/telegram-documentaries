@@ -1,9 +1,9 @@
-"""Phase 1 Telegram gateway (entry point).
+"""Phase 1-2 Telegram gateway (entry point).
 
 Responsibilities:
 - load secrets from ``.env`` (never hardcode, never log them),
-- long-poll Telegram (``getUpdates``) and answer every incoming message with
-  a hardcoded friendly reply (later phases replace the echo),
+- long-poll Telegram (``getUpdates``) and route each update to the current
+  pipeline stage (Phase 2: the Bouncer vision gate),
 - fail loudly with a clear log when configuration is missing,
 - shut down gracefully on Ctrl+C / SIGTERM, even mid-poll.
 
@@ -16,10 +16,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+from telegram_documentaries import bouncer
+from telegram_documentaries.bouncer import (
+    GeminiApiError,
+    GeminiVisionClient,
+    PhotoValidationError,
+)
 from telegram_documentaries.config import (
     REDACTED,
     ConfigError,
@@ -27,11 +34,45 @@ from telegram_documentaries.config import (
     install_secret_redaction,
     load_settings,
 )
-from telegram_documentaries.models import Update, UpdateResult
+from telegram_documentaries.logging_utils import log_phase_transition
+from telegram_documentaries.models import (
+    Message,
+    Phase,
+    SessionState,
+    Update,
+    UpdateResult,
+)
 
 logger = logging.getLogger(__name__)
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
+
+#: Where accepted portraits are stored (gitignored; keyed per chat_id).
+DEFAULT_MEDIA_ROOT = ".tmp/media"
+
+#: Fixed in-character replies for the awaiting-photo phase (rejections are
+#: model-written by the Bouncer; these cover input that was never judged).
+PHOTO_NUDGE = (
+    "A pleasure to hear from you - but I judge faces, not words. "
+    "Send me a photograph and we will get you on camera."
+)
+#: Input that arrives before the stage behind us exists (interview onwards).
+LATER_PHASE_REPLY = (
+    "One moment - the crew is still setting up this scene. Give me a beat to catch up."
+)
+#: The vision gate failed (API down/timeout): degrade, do not crash.
+BOUNCER_RETRY_MSG = (
+    "Apologies - the studio's vision apparatus just coughed up a hairball. "
+    "Send that photo again in a moment."
+)
+#: Edge validation refused the upload (too large).
+PHOTO_TOO_LARGE_MSG = (
+    "That frame is a touch too large for my lens. Send a smaller photograph, please."
+)
+#: Catch-all after an unexpected failure on the conversation path.
+DISPATCH_FAILURE_MSG = (
+    "Something went sideways backstage and that take was lost - do try once more."
+)
 
 
 class TelegramApiError(Exception):
@@ -140,19 +181,155 @@ class TelegramClient:
             payload={"chat_id": chat_id, "text": text},
         )
 
+    async def download_file(self, file_id: str) -> bytes:
+        """Download a Telegram file's raw bytes (``getFile`` + file fetch).
 
-def build_reply(update: Update) -> str:
-    """Build the hardcoded friendly response for a validated Phase 1 update.
+        Args:
+            file_id: Telegram file ID (from a ``PhotoSize``, etc.).
+
+        Returns:
+            The raw file bytes (untrusted; size-checked by the caller).
+
+        Raises:
+            TelegramApiError: If ``getFile`` returns an unexpected shape or
+                either HTTP call fails, with the bot token redacted.
+        """
+        data = await self._request("getFile", params={"file_id": file_id})
+        if not isinstance(data, dict) or not isinstance(data.get("result"), dict):
+            raise TelegramApiError(
+                "Telegram API getFile returned an unexpected response shape"
+            )
+        file_path = data["result"].get("file_path")
+        if not isinstance(file_path, str) or not file_path:
+            raise TelegramApiError(
+                "Telegram API getFile result is missing a valid file_path"
+            )
+
+        url = f"{self.base_url}/file/bot{self.token}/{file_path}"
+        try:
+            response = await self._client.get(url)
+        except httpx.HTTPError as exc:
+            detail = self._sanitize(str(exc))
+            # `from None`: the original exception could embed the URL with
+            # the bot token; never chain it into logs/tracebacks.
+            raise TelegramApiError(
+                f"Telegram file download failed ({type(exc).__name__}): {detail}"
+            ) from None
+        if response.is_error:
+            body = self._sanitize(response.text[:300])
+            raise TelegramApiError(
+                f"Telegram file download returned HTTP {response.status_code}: {body}"
+            ) from None
+        return response.content
+
+
+def build_reply(message: Message, session: SessionState) -> str | None:
+    """Build the reply for non-photo input at the session's current phase.
 
     Args:
-        update: Validated update from Telegram.
+        message: Validated Telegram message (never a raw dict).
+        session: The sender's session state (phase decides the reply).
 
     Returns:
-        The hardcoded reply string (replaced by real pipeline stages later).
+        The fixed in-character reply, or ``None`` when the message is a
+        photo — photos are handled by the Bouncer flow, not a plain reply.
     """
-    if update.message is not None:
-        return "Hello! Thanks for your message. Phase 1 gateway is running."
-    return "Hello! Thanks for reaching out. Phase 1 gateway is running."
+    if message.photo:
+        return None
+    if session.phase == Phase.AWAITING_PHOTO:
+        return PHOTO_NUDGE
+    return LATER_PHASE_REPLY
+
+
+def _session_for(sessions: dict[int, SessionState], chat_id: int) -> SessionState:
+    """Fetch or lazily create the shared session state for a chat."""
+    session = sessions.get(chat_id)
+    if session is None:
+        session = SessionState(chat_id=chat_id)
+        sessions[chat_id] = session
+    return session
+
+
+def _store_photo(media_root: str | Path, chat_id: int, image_bytes: bytes) -> str:
+    """Persist accepted portrait bytes under ``media_root/<chat_id>/``.
+
+    Returns:
+        The path the portrait was written to (held by the session until the
+        pipeline consumes it; purged on ``/restart``, Phase 7).
+    """
+    directory = Path(media_root) / str(chat_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "portrait.jpg"
+    path.write_bytes(image_bytes)
+    return str(path)
+
+
+async def _handle_photo(
+    client: TelegramClient,
+    vision: GeminiVisionClient,
+    session: SessionState,
+    message: Message,
+    media_root: str | Path,
+) -> None:
+    """Run the Bouncer flow for one photo message; never raises.
+
+    Accept: store media, advance to ``AWAITING_INTERVIEW``, send the
+    model-written confirmation. Reject: send the content-specific quip and
+    clear partial state so the user can immediately retry (no ``/start``).
+    Failures: clear state first, then degrade with an in-character reply —
+    every branch logs loudly (TECH.md error policy).
+    """
+    chat_id = message.chat.id
+    if session.phase != Phase.AWAITING_PHOTO:
+        logger.info("photo_out_of_phase chat_id=%s phase=%s", chat_id, session.phase)
+        await client.send_message(chat_id=chat_id, text=LATER_PHASE_REPLY)
+        return
+
+    log_phase_transition(logger, chat_id, session.phase, Phase.BOUNCER_CHECK)
+    session.phase = Phase.BOUNCER_CHECK
+
+    try:
+        image_bytes = await bouncer.fetch_photo(client, message.photo or [])
+        verdict = await vision.check_photo(image_bytes)
+    except PhotoValidationError:
+        # Expected user input (too large): reset for retry, log with context.
+        logger.warning("photo refused at the edge chat_id=%s", chat_id, exc_info=True)
+        session.clear()
+        await client.send_message(chat_id=chat_id, text=PHOTO_TOO_LARGE_MSG)
+        return
+    except (GeminiApiError, TelegramApiError):
+        logger.exception("bouncer failed chat_id=%s", chat_id)
+        session.clear()
+        await client.send_message(chat_id=chat_id, text=BOUNCER_RETRY_MSG)
+        return
+
+    if not verdict.accepted:
+        logger.info(
+            "bouncer_rejected chat_id=%s reason=%s subject=%r",
+            chat_id,
+            verdict.reason,
+            verdict.observed_subject,
+        )
+        session.clear()
+        await client.send_message(chat_id=chat_id, text=verdict.message)
+        log_phase_transition(logger, chat_id, Phase.BOUNCER_CHECK, session.phase)
+        return
+
+    # Accepted: persist the portrait, advance the state machine, confirm.
+    try:
+        stored_path = _store_photo(media_root, chat_id, image_bytes)
+    except OSError:
+        logger.exception("failed to store accepted photo chat_id=%s", chat_id)
+        session.clear()
+        await client.send_message(chat_id=chat_id, text=DISPATCH_FAILURE_MSG)
+        return
+    if message.photo:
+        session.photo_file_id = bouncer.select_photo_size(message.photo).file_id
+    session.photo_local_path = stored_path
+    session.temp_media_path = str(Path(stored_path).parent)
+    log_phase_transition(logger, chat_id, session.phase, Phase.AWAITING_INTERVIEW)
+    session.phase = Phase.AWAITING_INTERVIEW
+    await client.send_message(chat_id=chat_id, text=verdict.message)
 
 
 def _install_signal_handlers(shutdown_event: asyncio.Event) -> None:
@@ -196,21 +373,53 @@ async def _poll_updates(
         await asyncio.gather(poll_task, stop_task, return_exceptions=True)
 
 
-async def _dispatch_update(client: TelegramClient, update: Update) -> None:
-    """Build the reply for one update and send it; never raises.
+async def _dispatch_update(
+    client: TelegramClient,
+    vision: GeminiVisionClient,
+    sessions: dict[int, SessionState],
+    media_root: str | Path,
+    update: Update,
+) -> None:
+    """Route one update through the current pipeline stage; never raises.
 
     A single bad update must not kill the polling loop, but every failure is
     logged loudly (TECH.md: no swallowed exceptions).
     """
-    if update.message is None:
-        logger.debug("Ignoring update %s: no message to reply to", update.update_id)
-        return
-
-    reply = build_reply(update)
     try:
-        await client.send_message(chat_id=update.message.chat.id, text=reply)
+        if update.message is None:
+            logger.debug(
+                "Ignoring update %s: no message to reply to",
+                update.update_id,
+            )
+            return
+
+        session = _session_for(sessions, update.message.chat.id)
+        if update.message.photo:
+            await _handle_photo(client, vision, session, update.message, media_root)
+            return
+
+        reply = build_reply(update.message, session)
+        if reply is None:
+            await _handle_photo(client, vision, session, update.message, media_root)
+            return
+
+        try:
+            await client.send_message(chat_id=update.message.chat.id, text=reply)
+        except Exception:
+            logger.exception(
+                "Failed to send reply to chat_id=%s", update.message.chat.id
+            )
+            try:
+                await client.send_message(
+                    chat_id=update.message.chat.id, text=DISPATCH_FAILURE_MSG
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send fallback reply to chat_id=%s",
+                    update.message.chat.id,
+                )
     except Exception:
-        logger.exception("Failed to send reply to chat_id=%s", update.message.chat.id)
+        logger.exception("Unexpected error handling update_id=%s", update.update_id)
 
 
 async def run_bot(
@@ -219,6 +428,7 @@ async def run_bot(
     error_backoff: float = 1.0,
     *,
     shutdown_event: asyncio.Event | None = None,
+    media_root: str | Path = DEFAULT_MEDIA_ROOT,
 ) -> None:
     """Run the Telegram long-polling loop until shutdown (or ``max_iterations``).
 
@@ -236,6 +446,7 @@ async def run_bot(
     settings = load_settings()
     # Redact the token from *all* log output before anything can log it.
     install_secret_redaction(settings.telegram_bot_token)
+    install_secret_redaction(settings.gemini_api_key)
 
     if shutdown_event is None:
         shutdown_event = asyncio.Event()
@@ -247,7 +458,9 @@ async def run_bot(
         token=settings.telegram_bot_token,
         timeout=max(30.0, poll_timeout + 10.0),
     )
-    logger.info("Starting Telegram gateway (Phase 1)")
+    vision = GeminiVisionClient(api_key=settings.gemini_api_key)
+    sessions: dict[int, SessionState] = {}
+    logger.info("Starting Telegram gateway (Phase 2 - Bouncer)")
 
     try:
         iterations = 0
@@ -264,11 +477,12 @@ async def run_bot(
             if updates is None:  # shutdown requested mid-poll
                 break
             for update in updates:
-                await _dispatch_update(client, update)
+                await _dispatch_update(client, vision, sessions, media_root, update)
             # Brief pause so a hot update feed cannot spin the loop.
             await asyncio.sleep(0.01)
     finally:
         await client.close()
+        await vision.close()
         logger.info("Telegram gateway stopped cleanly")
 
 

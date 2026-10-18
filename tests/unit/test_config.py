@@ -27,7 +27,10 @@ def _write_dotenv(path: Path, **values: str) -> None:
 
 class TestLoadSettings:
     def test_returns_token_from_provided_environment(self) -> None:
-        environ: Mapping[str, str] = {"TELEGRAM_BOT_TOKEN": PLACEHOLDER_TOKEN}
+        environ: Mapping[str, str] = {
+            "TELEGRAM_BOT_TOKEN": PLACEHOLDER_TOKEN,
+            "GEMINI_API_KEY": PLACEHOLDER_GEMINI_KEY,
+        }
 
         settings = load_settings(environ)
 
@@ -35,7 +38,10 @@ class TestLoadSettings:
         assert settings.telegram_bot_token == PLACEHOLDER_TOKEN
 
     def test_strips_surrounding_whitespace_from_token(self) -> None:
-        environ: Mapping[str, str] = {"TELEGRAM_BOT_TOKEN": f"  {PLACEHOLDER_TOKEN}  "}
+        environ: Mapping[str, str] = {
+            "TELEGRAM_BOT_TOKEN": f"  {PLACEHOLDER_TOKEN}  ",
+            "GEMINI_API_KEY": PLACEHOLDER_GEMINI_KEY,
+        }
 
         settings = load_settings(environ)
 
@@ -54,7 +60,12 @@ class TestLoadSettings:
 
     def test_never_logs_the_token_value(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.DEBUG):
-            load_settings({"TELEGRAM_BOT_TOKEN": PLACEHOLDER_TOKEN})
+            load_settings(
+                {
+                    "TELEGRAM_BOT_TOKEN": PLACEHOLDER_TOKEN,
+                    "GEMINI_API_KEY": PLACEHOLDER_GEMINI_KEY,
+                }
+            )
 
         assert PLACEHOLDER_TOKEN not in caplog.text
 
@@ -84,7 +95,11 @@ class TestDotenvLoading:
     ) -> None:
         """Production overrides (real env) must never be clobbered by .env."""
         env_token = "999:FROM-REAL-ENV-PLACEHOLDER"
-        _write_dotenv(tmp_path / ".env", TELEGRAM_BOT_TOKEN=PLACEHOLDER_TOKEN)
+        _write_dotenv(
+            tmp_path / ".env",
+            TELEGRAM_BOT_TOKEN=PLACEHOLDER_TOKEN,
+            GEMINI_API_KEY=PLACEHOLDER_GEMINI_KEY,
+        )
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", env_token)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
@@ -131,15 +146,19 @@ class TestGeminiApiKey:
         [None, {"GEMINI_API_KEY": ""}, {"GEMINI_API_KEY": "   "}],
         ids=["missing", "empty", "whitespace-only"],
     )
-    def test_is_none_when_not_configured(self, extra: Mapping[str, str] | None) -> None:
-        """Phase 1 does not call Gemini yet, so the key must be optional."""
+    def test_is_required_and_raises_when_absent_or_empty(
+        self, extra: Mapping[str, str] | None
+    ) -> None:
+        """Phase 2: the Bouncer calls Gemini vision, so the key is required.
+
+        Startup must fail loudly instead of polling without credentials.
+        """
         environ: dict[str, str] = {"TELEGRAM_BOT_TOKEN": PLACEHOLDER_TOKEN}
         if extra is not None:
             environ.update(extra)
 
-        settings = load_settings(environ)
-
-        assert settings.gemini_api_key is None
+        with pytest.raises(ConfigError, match="GEMINI_API_KEY"):
+            load_settings(environ)
 
     def test_never_logs_the_gemini_api_key(
         self, caplog: pytest.LogCaptureFixture

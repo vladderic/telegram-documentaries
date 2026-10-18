@@ -29,7 +29,7 @@ class Settings:
     def __init__(
         self,
         telegram_bot_token: str,
-        gemini_api_key: str | None = None,
+        gemini_api_key: str,
     ) -> None:
         self.telegram_bot_token = telegram_bot_token
         self.gemini_api_key = gemini_api_key
@@ -115,15 +115,6 @@ def _get_required_str(environ: Mapping[str, str], key: str) -> str:
     return stripped
 
 
-def _get_optional_str(environ: Mapping[str, str], key: str) -> str | None:
-    """Fetch an optional string; missing or blank values become ``None``."""
-    value = environ.get(key)
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     """Load settings from ``.env`` / the process environment.
 
@@ -136,7 +127,8 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         The loaded settings. Never logged with secret values (TECH.md).
 
     Raises:
-        ConfigError: If ``TELEGRAM_BOT_TOKEN`` is missing or empty.
+        ConfigError: If ``TELEGRAM_BOT_TOKEN`` or ``GEMINI_API_KEY`` is
+            missing or empty (the Bouncer cannot run without Gemini vision).
     """
     if environ is None:
         _load_dotenv_file()
@@ -145,7 +137,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         env = environ
 
     telegram_bot_token = _get_required_str(env, "TELEGRAM_BOT_TOKEN")
-    gemini_api_key = _get_optional_str(env, "GEMINI_API_KEY")
+    gemini_api_key = _get_required_str(env, "GEMINI_API_KEY")
 
     # Never log secrets (TECH.md): report configuration *presence* only.
     logger.info(
