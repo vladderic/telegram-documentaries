@@ -156,6 +156,62 @@ class TestGenerate:
         await client.close()
 
 
+class TestSystemInstruction:
+    """Phase 5: a stage may speak through the API's own system instruction."""
+
+    @pytest.mark.asyncio
+    async def test_sends_the_system_instruction_when_asked(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json=gemini_response({"answer": "ok"}))
+
+        client = make_client(handler)
+        try:
+            await client.generate(CONTENTS, SCHEMA, system_instruction="Be a narrator.")
+        finally:
+            await client.close()
+
+        body = json.loads(seen[0].content)
+        assert body["systemInstruction"] == {"parts": [{"text": "Be a narrator."}]}
+        # The user turn keeps carrying only the task input.
+        assert body["contents"] == CONTENTS
+
+    @pytest.mark.asyncio
+    async def test_omits_the_field_entirely_when_not_asked(self) -> None:
+        """Every existing stage must keep sending today's exact body."""
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json=gemini_response({"answer": "ok"}))
+
+        client = make_client(handler)
+        try:
+            await client.generate(CONTENTS, SCHEMA)
+        finally:
+            await client.close()
+
+        body = json.loads(seen[0].content)
+        assert "systemInstruction" not in body
+
+    @pytest.mark.asyncio
+    async def test_still_returns_the_decoded_object(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=gemini_response({"answer": "42"}))
+
+        client = make_client(handler)
+        try:
+            result = await client.generate(
+                CONTENTS, SCHEMA, system_instruction="Be a narrator."
+            )
+        finally:
+            await client.close()
+
+        assert result == {"answer": "42"}
+
+
 class TestGenerateUrl:
     def test_builds_the_model_endpoint(self) -> None:
         assert generate_url(TEST_MODEL) == (

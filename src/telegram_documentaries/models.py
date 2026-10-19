@@ -356,6 +356,30 @@ class GeneratedImage(BaseModel):
         return cls.model_validate({"mime_type": mime_type, "data": data})
 
 
+class Script(BaseModel):
+    """The Scripter's output: the narration, ready for the microphone.
+
+    The validator is the contract guarantee: a ``Script`` is always exactly one
+    paragraph - every whitespace run, line breaks included, collapses to a
+    single space - so no caller has to re-normalise the narrator's text and
+    Phase 6 can synthesise it as-is. The narrator's words are never rewritten:
+    the prompt is the style lever, and over-length text is logged, not cut.
+    """
+
+    text: str
+
+    model_config = {
+        "extra": "ignore",
+    }
+
+    @field_validator("text")
+    @classmethod
+    def validate_single_paragraph(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("text must be a non-empty string")
+        return " ".join(v.split())
+
+
 class InterviewState(BaseModel):
     """Typed interview progress for one chat.
 
@@ -391,10 +415,10 @@ class InterviewState(BaseModel):
 class SessionState(BaseModel):
     """Typed per-chat_id session state.
 
-    The schema is versioned; this is v1.1 (adds the Phase 3 interview state).
+    The schema is versioned; this is v1.2 (adds the Phase 5 script text).
     Contains the current phase, any stored photo reference (file_id and local
-    path as stored), the interview progress, and provides a clear operation to
-    reset state.
+    path as stored), the interview progress, the narration once written, and
+    provides a clear operation to reset state.
     """
 
     chat_id: int
@@ -407,6 +431,10 @@ class SessionState(BaseModel):
     photo_mime_type: str = "image/jpeg"
     temp_media_path: str | None = None
     interview: InterviewState = Field(default_factory=InterviewState)
+    #: The narration actually sent to the user (Phase 5). Phase 6 synthesises
+    #: the voice note from these very words, so no second model call can make
+    #: the audio say something the user never read.
+    script_text: str | None = None
 
     model_config = {
         "extra": "ignore",
@@ -420,6 +448,7 @@ class SessionState(BaseModel):
         self.photo_local_path = None
         self.photo_mime_type = "image/jpeg"
         self.temp_media_path = None
+        self.script_text = None
         self.interview = InterviewState()
 
     def to_dict(self) -> dict[str, Any]:

@@ -129,3 +129,32 @@ class TestStoredPortraitMediaType:
 
         assert state.photo_mime_type == "image/jpeg"
         assert state.photo_local_path is None
+
+
+class TestStoredScript:
+    """Phase 5: the delivered narration is kept for Phase 6's voice synthesis."""
+
+    def test_defaults_to_no_script(self) -> None:
+        assert SessionState(chat_id=555).script_text is None
+
+    def test_records_the_delivered_narration(self) -> None:
+        state = SessionState(
+            chat_id=555, phase=Phase.SCRIPT, script_text="Our subject stirs."
+        )
+
+        assert state.script_text == "Our subject stirs."
+
+    def test_clear_resets_it(self) -> None:
+        state = SessionState(chat_id=555, phase=Phase.SCRIPT, script_text="Gone.")
+
+        state.clear()
+
+        assert state.script_text is None
+
+    def test_sessions_do_not_share_a_script(self) -> None:
+        first = SessionState(chat_id=1)
+        second = SessionState(chat_id=2)
+
+        first.script_text = "Only mine."
+
+        assert second.script_text is None

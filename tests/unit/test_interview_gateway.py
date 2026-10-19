@@ -25,6 +25,7 @@ from telegram_documentaries.models import (
     InterviewAnswer,
     InterviewState,
     InterviewStep,
+    Script,
     Update,
 )
 
@@ -46,6 +47,9 @@ PHOTO_HOLD = bot_gateway.PHOTO_HOLD_MSG
 #: The image the Converter fake hands back (the wiring is Phase 4's concern;
 #: these tests only need the finish routes to reach it without a real API call).
 CONVERTED_IMAGE = GeneratedImage(mime_type="image/jpeg", data=b"HYBRID-BYTES")
+#: The narration the Scripter fake returns: Phase 5 always follows the
+#: portrait, so the finish-path assertions below end on these words.
+NARRATION = "Our subject rises at dusk and patrols the kitchen with intent."
 
 
 class FakeConverter:
@@ -60,6 +64,21 @@ class FakeConverter:
     ) -> GeneratedImage:
         self.calls.append(profile)
         return CONVERTED_IMAGE
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeScripter:
+    """Minimal stand-in for :class:`ScripterClient` (returns one canned script)."""
+
+    def __init__(self) -> None:
+        self.calls: list[BehaviouralProfile] = []
+        self.closed = False
+
+    async def write_script(self, profile: BehaviouralProfile) -> Script:
+        self.calls.append(profile)
+        return Script(text=NARRATION)
 
     async def close(self) -> None:
         self.closed = True
@@ -244,6 +263,7 @@ async def run_updates(
         patch.object(
             bot_gateway, "ConverterClient", return_value=converter or FakeConverter()
         ),
+        patch.object(bot_gateway, "ScripterClient", return_value=FakeScripter()),
         patch.object(bot_gateway, "_now", return_value=now),
     ):
         await bot_gateway.run_bot(
@@ -398,9 +418,11 @@ class TestAnswerRouting:
         assert "A shameless thief of anything shiny." in texts[7]
         assert texts[7].count("Eurasian magpie") == 1
         # Phase advanced to CONVERT: the hold line goes out while the portrait
-        # is generated, and the next message gets the holding reply.
+        # is generated, the narration follows it (Phase 5), and the next
+        # message gets the holding reply.
         assert texts[8] == bot_gateway.PORTRAIT_HOLD_MSG
-        assert texts[9] == bot_gateway.LATER_PHASE_REPLY
+        assert texts[9] == NARRATION
+        assert texts[10] == bot_gateway.LATER_PHASE_REPLY
         assert interviewer.methods[-1] == "next_step"
         assert interviewer.methods.count("next_step") == 1
         assert interviewer.methods.count("distil") == 0
@@ -447,13 +469,14 @@ class TestAnswerRouting:
         assert len(last.interview.answers) == 6
         # The distilled profile (not a step payload) is revealed to the user,
         # and the ceiling route reaches the Converter like every other finish.
-        assert sent_texts(send)[-2] == bot_gateway.PROFILE_REVEAL_TEMPLATE.format(
+        assert sent_texts(send)[-3] == bot_gateway.PROFILE_REVEAL_TEMPLATE.format(
             profile=DISTILLED_PROFILE.profile,
             animal=DISTILLED_PROFILE.suggested_animal,
             animal_description=DISTILLED_PROFILE.animal_description,
         )
-        assert "A lone hunter of the small hours." in sent_texts(send)[-2]
-        assert sent_texts(send)[-1] == bot_gateway.PORTRAIT_HOLD_MSG
+        assert sent_texts(send)[-2] == bot_gateway.PORTRAIT_HOLD_MSG
+        assert sent_texts(send)[-1] == NARRATION
+        assert "A lone hunter of the small hours." in sent_texts(send)[-3]
 
 
 class TestNonTextInput:

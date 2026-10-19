@@ -24,6 +24,14 @@ keyed by `chat_id`, final dossier summary + suggested animal.
 - **Acceptance:** full interview completes with correct phase transitions;
   dossier persists across the Q&A; wrong-type messages mid-interview handled
   gracefully.
+- **Amendment (Phase 5, user request):** the interview deliberately covers the
+  material the narration is built from — the nightly routine, what and when the
+  subject eats or snacks, and one repeated odd habit — and finishing is gated on
+  that coverage. The profile is written as concrete, quotable behaviour rather
+  than abstractions, because the dossier is the Scripter's only fuel: a live
+  Phase 5 run on a thin dossier produced a paragraph of generic species biology
+  instead of the subject's own quirks. See
+  `SPECS/2026-10-19-interviewer/requirements.md` (live observations).
 - **Serves:** happy path.
 
 ## Phase 4 — Converter
@@ -57,6 +65,28 @@ One-paragraph (~60–90 word) dramatic British-documentary narration built from
 the dossier.
 - **Acceptance:** script generated from dossier, length-bounded, in the
   documentary voice.
+- **Implementation:** `scripter.py` (`SCRIPTER_MODEL = "gemini-3.1-flash-lite"`,
+  `MAX_WORDS = 90`, `SCRIPTER_PERSONA`/`SCRIPT_RULES`, `build_prompt`,
+  `SCRIPT_SCHEMA`, `ScripterClient.write_script`) and the typed `Script` contract
+  (whitespace normalised to one paragraph). The persona and rules go to Gemini as
+  a `systemInstruction` — the first stage in this repo to use that field;
+  `GeminiClient.generate` only sends it when one is given. The narration is sent
+  as plain text (no parse mode) immediately after the portrait by `_write_script`,
+  on the same single finish path, and kept on `SessionState.script_text` for
+  Phase 6. The two stages are independent: a jammed darkroom still narrates, a
+  lost script still leaves the portrait standing. Over-length output is sent as
+  written with a `scripter_over_word_limit` warning.
+- **Voice fix (live finding):** the narrator is pinned to the subject's own
+  documented habits — never the species' natural history — with concrete dossier
+  detail preferred over abstract traits, and the dossier leads the user turn
+  while the species note is labelled as flavour only. The interview was
+  strengthened alongside it (see Phase 3's amendment); a controlled live check
+  showed the same dossiers now produce quirk-anchored narration instead of
+  raccoon biology.
+- **Live verified (`2026-10-19`):** a full Telegram run (giant panda, 5 answers)
+  delivered the portrait and then an 82-word narration naming the same species,
+  with one-narration-per-session holding (`LATER_PHASE_REPLY` on later
+  messages). Boxes and evidence: `SPECS/2026-10-19-scripter/validation.md`.
 - **Serves:** happy path.
 
 ## Phase 6 — Narrator
@@ -100,7 +130,7 @@ OOM kill, box restart) never leaves it silently offline.
 | 2 — Bouncer | Complete |
 | 3 — Interviewer | Complete |
 | 4 — Converter | Complete |
-| 5 — Scripter | Not started |
+| 5 — Scripter | Complete |
 | 6 — Narrator | Not started |
 | 7 — Resilience | Not started |
 | 8 — Deployment (zero-cost) | Not started |

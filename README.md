@@ -5,7 +5,7 @@ documentary about you — hybrid human-animal portrait plus a dramatic
 British-documentary voiceover, all inside one Telegram conversation.
 The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 
-> **Status: Phase 4 — Converter.** The bot boots, long-polls Telegram, and
+> **Status: Phase 5 — Scripter.** The bot boots, long-polls Telegram, and
 > gates every conversation on a portrait photo: a Gemini vision verdict
 > accepts a solo real human (storing the photo and advancing the session) or
 > rejects everything else with a content-specific, in-character quip. An
@@ -13,9 +13,10 @@ The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 > ending in a case-file reveal of the dossier, the suggested animal (a bare
 > species name) and a one-line description of it. The stored photo and the
 > dossier are then fused by Gemini image generation into one hybrid portrait
-> and uploaded to the chat, captioned with the suggested species. The
-> remaining stages — Scripter, Narrator — arrive in later phases
-> ([`SPECS/ROADMAP.md`](SPECS/ROADMAP.md)).
+> and uploaded to the chat, captioned with the suggested species — and the
+> narrator immediately follows with one paragraph of documentary narration as
+> a plain text message. The remaining stage — Narrator — arrives in a later
+> phase ([`SPECS/ROADMAP.md`](SPECS/ROADMAP.md)).
 
 ## Pipeline (target architecture)
 
@@ -28,7 +29,7 @@ The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 5. **Converter** — photo + dossier → hybrid animal portrait, sent back to
    Telegram.
 6. **Scripter** — one paragraph (~60–90 words) of dramatic documentary
-   narration.
+   narration, sent as a plain text message.
 7. **Narrator** — the script synthesised as a Telegram voice note (Gemini
    TTS).
 
@@ -50,7 +51,7 @@ Environment variables (loaded from `.env`; never committed, never logged):
 | Variable | Purpose |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | **Required.** Token from [@BotFather](https://t.me/BotFather). Startup fails loudly with a clear log if it is missing or empty. |
-| `GEMINI_API_KEY` | **Required.** Key from [Google AI Studio](https://aistudio.google.com/apikey); the Bouncer calls Gemini vision on every photo, the Interviewer calls Gemini text on every question, and the Converter calls Gemini image generation when the interview ends. Startup fails loudly if it is missing or empty. |
+| `GEMINI_API_KEY` | **Required.** Key from [Google AI Studio](https://aistudio.google.com/apikey); the Bouncer calls Gemini vision on every photo, the Interviewer calls Gemini text on every question, the Converter calls Gemini image generation when the interview ends, and the Scripter calls Gemini text for the narration. Startup fails loudly if it is missing or empty. |
 
 ## Run the bot
 
@@ -72,16 +73,28 @@ It long-polls Telegram (`getUpdates`) and runs the three stages built so far:
 2. **Interviewer** — an accepted photo gets a short confirmation and the first
    of 5–7 interview questions, one per message, adapted to the answers given
    so far. A message queued *before* the pending question went out is nudged
-   rather than recorded. When the interview ends (the model decides, inside the
-   5–7 window), the bot reveals the case file: profile, the suggested animal as
-   a bare species name, and a one-line description of it.
+   rather than recorded. The questions deliberately cover the material the
+   narration is built from — the nightly routine, what and when you eat or
+   snack, and a repeated odd habit — and the interview only ends once it has.
+   When the interview ends (the model decides, inside the 5–7 window), the bot
+   reveals the case file: profile, the suggested animal as a bare species name,
+   and a one-line description of it.
 3. **Converter** — the stored portrait and the dossier go to Gemini image
    generation (after a "darkroom" hold line, since generation takes seconds)
    and the hybrid portrait comes back as a captioned photo. The stored bytes
    are handed over unmodified, together with the media type they were uploaded
    with. If generation, the upload or reading the stored portrait fails, the
-   bot says so in character and the session stays put — no crash, no partial
+   bot says so in character and the session moves on — no crash, no partial
    state.
+4. **Scripter** — the dossier goes to Gemini text with the narrator persona and
+   rules as the model's system instruction, and one paragraph (~60–90 words) of
+   narration comes back as a plain text message, sent right after the portrait.
+   The narration is about *your own* habits — the dossier is its only source —
+   never a lecture about the animal you were cast as. A 91-word+ script is still
+   sent (words are never rewritten), with a warning in the log. The portrait and
+   the narration are independent: if the darkroom jams the narrator still
+   speaks, and if the narrator loses his page the portrait still stands. The text
+   is kept on the session for Phase 6 (TTS).
 
 Shut down gracefully with **Ctrl+C** or **SIGTERM** — even while a long poll is
 in flight. Sessions live in memory only, so a restart means a fresh photo.
@@ -143,8 +156,9 @@ src/telegram_documentaries/
   bouncer.py       # Gemini vision client: photo → structured accept/reject verdict
   interviewer.py   # Gemini text client: adaptive questions + dossier/profile
   converter.py     # Gemini image client: photo + dossier → hybrid portrait
+  scripter.py      # Gemini text client: dossier → one-paragraph narration
   logging_utils.py # async-call timing + phase-transition log helpers
-  bot_gateway.py   # entry point: long-polling loop, photo + interview flows
+  bot_gateway.py   # entry point: long-polling loop, photo + interview + reveal flows
   __main__.py      # python -m telegram_documentaries
 tests/unit/        # Red/Green test suite
 scripts/           # dev scripts: test, hooks (ground truth, see TECH.md)
