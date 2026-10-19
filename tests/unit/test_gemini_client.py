@@ -466,3 +466,36 @@ class TestGenerateAudio:
                 await client.generate_audio("text", voice="Charon")
         finally:
             await client.close()
+
+    @pytest.mark.asyncio
+    async def test_empty_inline_audio_data_is_a_typed_error(self) -> None:
+        """An empty base64 payload must fail as GeminiApiError, never leak a
+        raw pydantic ValidationError across the boundary (TECH.md)."""
+        response = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {
+                                "inlineData": {
+                                    "mimeType": "audio/l16; rate=24000; channels=1",
+                                    "data": "",
+                                }
+                            }
+                        ],
+                    },
+                    "finishReason": "STOP",
+                }
+            ]
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=response)
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(GeminiApiError):
+                await client.generate_audio("text", voice="Charon")
+        finally:
+            await client.close()

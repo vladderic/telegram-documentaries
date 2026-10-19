@@ -47,7 +47,7 @@ class _InlineData(BaseModel):
     """The ``inlineData`` payload: base64 data plus its media type."""
 
     mime_type: str = Field(validation_alias=AliasChoices("mimeType", "mime_type"))
-    data: str
+    data: str = Field(min_length=1)
 
     model_config = {
         "extra": "ignore",
@@ -291,7 +291,16 @@ class GeminiClient:
                 inline = _InlineAudioPart.model_validate(part)
             except ValidationError:
                 continue  # a text part, or a part we cannot read: keep looking
-            return InlineAudio(
-                data=inline.inline.data, mime_type=inline.inline.mime_type
-            )
+            try:
+                return InlineAudio(
+                    data=inline.inline.data, mime_type=inline.inline.mime_type
+                )
+            except ValidationError as exc:
+                # An empty (or otherwise invalid) payload is a typed failure,
+                # never a raw pydantic error escaping the documented
+                # GeminiApiError contract (mirrors the Converter).
+                raise GeminiApiError(
+                    f"Gemini API returned an unexpected TTS response shape "
+                    f"({type(exc).__name__})"
+                ) from None
         raise GeminiApiError("Gemini API returned no inline audio part")
