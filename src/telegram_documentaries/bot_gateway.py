@@ -50,6 +50,7 @@ from telegram_documentaries.models import (
     InterviewStep,
     Message,
     Phase,
+    PortraitSource,
     SessionState,
     Update,
     UpdateResult,
@@ -73,7 +74,9 @@ DEFAULT_MEDIA_ROOT = ".tmp/media"
 
 #: Accepted portraits are always persisted as JPEG by ``_store_photo``, so the
 #: Converter is told the same media type the file on disk actually has.
-PORTRAIT_MIME_TYPE = "image/jpeg"
+#: Telegram's ``photo`` array is always JPEG; documents declare their own
+#: type (kept in ``session.photo_mime_type``), so the Converter never has to
+#: guess what it was handed (Phase 4b).
 
 #: Phases owned by the Interviewer (Phase 3): text is an answer, anything else
 #: (or nothing at all) only nudges.
@@ -161,7 +164,7 @@ class TelegramApiError(Exception):
     """A Telegram API call failed. The message never contains the bot token."""
 
 
-_PHOTO_FILENAMES = {
+_UPLOAD_FILENAMES = {
     "image/jpeg": "portrait.jpg",
     "image/jpg": "portrait.jpg",
     "image/png": "portrait.png",
@@ -170,9 +173,9 @@ _PHOTO_FILENAMES = {
 }
 
 
-def _photo_filename(mime_type: str) -> str:
+def _upload_filename(mime_type: str) -> str:
     """Pick an upload filename from the image's media type (Telegram needs one)."""
-    return _PHOTO_FILENAMES.get(mime_type, "portrait.jpg")
+    return _UPLOAD_FILENAMES.get(mime_type, "portrait.jpg")
 
 
 class TelegramClient:
@@ -379,7 +382,7 @@ class TelegramClient:
             form={"chat_id": str(chat_id), "caption": caption},
             files={
                 "photo": (
-                    _photo_filename(image.mime_type),
+                    _upload_filename(image.mime_type),
                     image.data,
                     image.mime_type,
                 )
@@ -447,10 +450,11 @@ def build_reply(message: Message, session: SessionState) -> str | None:
         session: The sender's session state (phase decides the reply).
 
     Returns:
-        The fixed in-character reply, or ``None`` when the message is a
-        photo — photos are handled by the Bouncer flow, not a plain reply.
+        The fixed in-character reply, or ``None`` when the message carries a
+        portrait (photo *or* image file) — those are handled by the Bouncer
+        flow, not a plain reply.
     """
-    if message.photo:
+    if bouncer.portrait_source(message) is not None:
         return None
     if session.phase == Phase.AWAITING_PHOTO:
         return PHOTO_NUDGE
@@ -466,8 +470,26 @@ def _session_for(sessions: dict[int, SessionState], chat_id: int) -> SessionStat
     return session
 
 
-def _store_photo(media_root: str | Path, chat_id: int, image_bytes: bytes) -> str:
+def _portrait_filename(mime_type: str) -> str:
+    """Name the stored portrait after its real media type.
+
+    ``image/jpeg`` keeps the familiar ``portrait.jpg``; anything else follows
+    the declared subtype (``image/png`` -> ``portrait.png``), so the bytes on
+    disk can never be mistaken for a format they are not (Phase 4b).
+    """
+    if mime_type == bouncer.PHOTO_MIME_TYPE:
+        return "portrait.jpg"
+    subtype = mime_type.split("/", 1)[-1]
+    return f"portrait.{subtype}"
+
+
+def _store_photo(
+    media_root: str | Path, chat_id: int, image_bytes: bytes, mime_type: str
+) -> str:
     """Persist accepted portrait bytes under ``media_root/<chat_id>/``.
+
+    Writes the original, unmodified bytes: a portrait sent as a file stays
+    full-resolution all the way to the Converter (Phase 4b).
 
     Returns:
         The path the portrait was written to (held by the session until the
@@ -475,7 +497,7 @@ def _store_photo(media_root: str | Path, chat_id: int, image_bytes: bytes) -> st
     """
     directory = Path(media_root) / str(chat_id)
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / "portrait.jpg"
+    path = directory / _portrait_filename(mime_type)
     path.write_bytes(image_bytes)
     return str(path)
 
@@ -568,7 +590,7 @@ async def _deliver_portrait(
     stored_path = session.photo_local_path
     try:
         if not stored_path:
-            # Only reachable if a finish route ran without a stored photo.
+            # Only reachable if a finish route ran without a stored portrait.
             raise FileNotFoundError("session has no stored portrait path")
         portrait = Path(stored_path).read_bytes()
     except OSError:
@@ -579,7 +601,7 @@ async def _deliver_portrait(
         return
 
     try:
-        image = await converter.fuse(portrait, PORTRAIT_MIME_TYPE, profile)
+        image = await converter.fuse(portrait, session.photo_mime_type, profile)
     except (GeminiApiError, TelegramApiError):
         logger.exception("converter failed chat_id=%s", chat_id)
         await _send(client, chat_id, PORTRAIT_FAILURE_MSG)
@@ -741,7 +763,10 @@ async def _handle_interview(
         message: The incoming message (its text and timestamp are used).
     """
     chat_id = session.chat_id
-    answer = "" if message.photo else (message.text or "").strip()
+    # A portrait (photo or image file) is never an answer, and neither is a
+    # caption: only ``text`` counts (Phase 4b, same predicate as the router).
+    portrait = bouncer.portrait_source(message) is not None
+    answer = "" if portrait else (message.text or "").strip()
 
     if not answer:
         pending = session.interview.pending_question
@@ -777,15 +802,16 @@ async def _handle_interview(
     await _handle_answer(client, converter, interviewer, session, answer)
 
 
-async def _handle_photo(
+async def _handle_portrait(
     client: TelegramClient,
     vision: GeminiVisionClient,
     interviewer: InterviewerClient,
     session: SessionState,
     message: Message,
+    portrait: PortraitSource,
     media_root: str | Path,
 ) -> None:
-    """Run the Bouncer flow for one photo message; never raises.
+    """Run the Bouncer flow for one portrait upload; never raises.
 
     Accept: store media, advance to ``AWAITING_INTERVIEW``, send the
     model-written confirmation and immediately ask the first interview
@@ -796,10 +822,22 @@ async def _handle_photo(
     """
     chat_id = message.chat.id
     if session.phase != Phase.AWAITING_PHOTO:
-        logger.info("photo_out_of_phase chat_id=%s phase=%s", chat_id, session.phase)
+        logger.info("portrait_out_of_phase chat_id=%s phase=%s", chat_id, session.phase)
         await client.send_message(chat_id=chat_id, text=LATER_PHASE_REPLY)
         return
 
+    # Which upload kind arrived decides the source resolution, so it belongs in
+    # the log: live validation reads it back (Phase 4b).
+    logger.info(
+        "portrait_received chat_id=%s kind=%s has_photo=%s has_document=%s "
+        "mime=%s declared_bytes=%s",
+        chat_id,
+        portrait.kind,
+        message.photo is not None,
+        message.document is not None,
+        portrait.mime_type,
+        portrait.file_size,
+    )
     log_phase_transition(logger, chat_id, session.phase, Phase.BOUNCER_CHECK)
     session.phase = Phase.BOUNCER_CHECK
     # Speak up immediately: the download takes seconds and the user must never
@@ -809,11 +847,13 @@ async def _handle_photo(
     await _send(client, chat_id, PHOTO_HOLD_MSG)
 
     try:
-        image_bytes = await bouncer.fetch_photo(client, message.photo or [])
-        verdict = await vision.check_photo(image_bytes)
+        image_bytes = await bouncer.fetch_portrait(client, portrait)
+        verdict = await vision.check_photo(image_bytes, portrait.mime_type)
     except PhotoValidationError:
         # Expected user input (too large): reset for retry, log with context.
-        logger.warning("photo refused at the edge chat_id=%s", chat_id, exc_info=True)
+        logger.warning(
+            "portrait refused at the edge chat_id=%s", chat_id, exc_info=True
+        )
         session.clear()
         await client.send_message(chat_id=chat_id, text=PHOTO_TOO_LARGE_MSG)
         return
@@ -837,15 +877,15 @@ async def _handle_photo(
 
     # Accepted: persist the portrait, advance the state machine, confirm.
     try:
-        stored_path = _store_photo(media_root, chat_id, image_bytes)
+        stored_path = _store_photo(media_root, chat_id, image_bytes, portrait.mime_type)
     except OSError:
-        logger.exception("failed to store accepted photo chat_id=%s", chat_id)
+        logger.exception("failed to store accepted portrait chat_id=%s", chat_id)
         session.clear()
         await client.send_message(chat_id=chat_id, text=DISPATCH_FAILURE_MSG)
         return
-    if message.photo:
-        session.photo_file_id = bouncer.select_photo_size(message.photo).file_id
+    session.photo_file_id = portrait.file_id
     session.photo_local_path = stored_path
+    session.photo_mime_type = portrait.mime_type
     session.temp_media_path = str(Path(stored_path).parent)
     log_phase_transition(logger, chat_id, session.phase, Phase.AWAITING_INTERVIEW)
     session.phase = Phase.AWAITING_INTERVIEW
@@ -927,20 +967,27 @@ async def _dispatch_update(
             )
             return
 
-        if update.message.photo:
-            await _handle_photo(
-                client, vision, interviewer, session, update.message, media_root
+        portrait = bouncer.portrait_source(update.message)
+        if portrait is not None:
+            await _handle_portrait(
+                client,
+                vision,
+                interviewer,
+                session,
+                update.message,
+                portrait,
+                media_root,
             )
             return
 
         reply = build_reply(update.message, session)
         if reply is None:
-            # Unreachable: photos were routed above (``build_reply`` returns
-            # None only for a photo). Logged loudly rather than silently
-            # re-running the photo flow - the Phase 3 lesson about a route
-            # that quietly re-enters an earlier stage.
+            # Unreachable: portraits were routed above (``build_reply``
+            # returns None only for a portrait). Logged loudly rather than
+            # silently re-running the portrait flow - the Phase 3 lesson about
+            # a route that quietly re-enters an earlier stage.
             logger.error(
-                "dispatch_unexpected_photo_reply chat_id=%s",
+                "dispatch_unexpected_portrait_reply chat_id=%s",
                 update.message.chat.id,
             )
             return

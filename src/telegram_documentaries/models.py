@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AliasChoices,
@@ -77,6 +77,38 @@ class PhotoSize(BaseModel):
     file_size: int | None = None
 
 
+class Document(BaseModel):
+    """Telegram document (file) model.
+
+    A portrait sent "as a file" arrives here, uncompressed: that is the whole
+    point of Phase 4b. Only the fields the pipeline needs are modelled.
+    """
+
+    file_id: str
+    file_unique_id: str
+    file_name: str | None = None
+    mime_type: str | None = None
+    file_size: int | None = None
+
+    model_config = {"extra": "ignore"}
+
+
+class PortraitSource(BaseModel):
+    """A message's eligible portrait upload (photo *or* image document).
+
+    Derived, never parsed from Telegram directly: it is the typed answer to
+    "is this message a portrait, and what is it?" so that the router, the
+    guards and the Bouncer intake all share one rule.
+    """
+
+    file_id: str
+    mime_type: str
+    file_size: int | None = None
+    #: How it was uploaded: a Telegram photo (compressed) or a file
+    #: (original bytes). Logged so live runs are diagnosable.
+    kind: Literal["photo", "document"]
+
+
 class Message(BaseModel):
     """Telegram message model.
 
@@ -90,6 +122,7 @@ class Message(BaseModel):
     text: str | None = None
     caption: str | None = None
     photo: Annotated[list[PhotoSize] | None, Field(default=None)] = None
+    document: Document | None = None
 
     # Map API alias "from" to from_user; also accept "from_user" if present.
     from_user: User | None = Field(
@@ -368,6 +401,10 @@ class SessionState(BaseModel):
     phase: Phase = Phase.AWAITING_PHOTO
     photo_file_id: str | None = None
     photo_local_path: str | None = None
+    #: Media type of the stored portrait (Phase 4b): a photo is always JPEG,
+    #: a document keeps whatever Telegram declared. Never guessed at the
+    #: Converter call site.
+    photo_mime_type: str = "image/jpeg"
     temp_media_path: str | None = None
     interview: InterviewState = Field(default_factory=InterviewState)
 
@@ -381,6 +418,7 @@ class SessionState(BaseModel):
         self.phase = Phase.AWAITING_PHOTO
         self.photo_file_id = None
         self.photo_local_path = None
+        self.photo_mime_type = "image/jpeg"
         self.temp_media_path = None
         self.interview = InterviewState()
 

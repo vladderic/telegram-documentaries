@@ -10,6 +10,7 @@ import asyncio
 import logging
 import signal
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -358,3 +359,29 @@ class TestMain:
         assert any("TELEGRAM_BOT_TOKEN" in message for message in error_messages)
         assert any(".env" in message for message in error_messages)
         assert PLACEHOLDER_TOKEN not in caplog.text
+
+
+class TestStorePortrait:
+    """The stored file must never claim a format it is not (Phase 4b)."""
+
+    def test_jpeg_keeps_the_familiar_name(self, tmp_path: Path) -> None:
+        path = bot_gateway._store_photo(tmp_path, 555, b"JPEG", "image/jpeg")
+
+        assert Path(path).name == "portrait.jpg"
+        assert Path(path).read_bytes() == b"JPEG"
+
+    def test_other_image_types_follow_their_subtype(self, tmp_path: Path) -> None:
+        for mime_type, expected in (
+            ("image/png", "portrait.png"),
+            ("image/webp", "portrait.webp"),
+            ("image/heic", "portrait.heic"),
+        ):
+            path = bot_gateway._store_photo(tmp_path, 555, b"BYTES", mime_type)
+            assert Path(path).name == expected, mime_type
+
+    def test_original_bytes_are_not_touched(self, tmp_path: Path) -> None:
+        original = bytes(range(256)) * 4
+
+        path = bot_gateway._store_photo(tmp_path, 555, original, "image/png")
+
+        assert Path(path).read_bytes() == original

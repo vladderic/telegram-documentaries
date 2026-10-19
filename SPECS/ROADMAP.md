@@ -39,6 +39,19 @@ portrait sent directly to Telegram.
   Converter. The client is built once in `run_bot` and closed on shutdown.
 - **Serves:** happy path.
 
+## Phase 4b — Full-resolution portrait input
+The portrait may be sent as a **file** (document) as well as a photo, so the
+Converter works from Telegram's original, uncompressed bytes instead of the
+compressed `PhotoSize` rendition.
+- **Acceptance:** a file portrait completes the whole pipeline exactly like a
+  photo, the stored bytes are the original ones, the Converter is told the real
+  media type, and non-image files are still nudged; a plain photo is unaffected.
+- **Implementation:** `Document`/`PortraitSource` contracts, one
+  `bouncer.portrait_source` rule shared by the router, the interview guard and
+  `build_reply`, `bouncer.fetch_portrait`, `_store_photo(..., mime_type)` and
+  `SessionState.photo_mime_type`.
+- **Serves:** portrait quality (the compressed photo caps the fusion).
+
 ## Phase 5 — Scripter
 One-paragraph (~60–90 word) dramatic British-documentary narration built from
 the dossier.

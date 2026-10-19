@@ -22,16 +22,27 @@ from pydantic import ValidationError
 
 from telegram_documentaries.gemini import GeminiApiError, GeminiClient
 from telegram_documentaries.logging_utils import log_async_call
-from telegram_documentaries.models import BouncerVerdict, PhotoSize
+from telegram_documentaries.models import (
+    BouncerVerdict,
+    Message,
+    PhotoSize,
+    PortraitSource,
+)
 
 logger = logging.getLogger(__name__)
 
 #: Vision model for the gate (constitution: Gemini 3.1 Flash Lite).
 BOUNCER_MODEL = "gemini-3.1-flash-lite"
 
-#: Hard edge limit for an uploaded photo (validated before *and* after
-#: download — untrusted input, TECH.md).
+#: Hard edge limit for an uploaded portrait (validated before *and* after
+#: download — untrusted input, TECH.md). One cap for photos and documents.
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
+
+#: Telegram's ``photo`` array is always JPEG; a document carries its own type.
+PHOTO_MIME_TYPE = "image/jpeg"
+
+#: Documents are portraits only when Telegram declares an image media type.
+IMAGE_MEDIA_TYPE_PREFIX = "image/"
 
 #: Guardrails prompt: acceptance bar, medium bar, personality rules.
 BOUNCER_PROMPT = """\
@@ -187,33 +198,65 @@ def select_photo_size(photo: list[PhotoSize]) -> PhotoSize:
     return max(photo, key=lambda size: size.width * size.height)
 
 
-@log_async_call(logger)
-async def fetch_photo(source: PhotoSource, photo: list[PhotoSize]) -> bytes:
-    """Download the photo from Telegram with edge validation (untrusted input).
+def portrait_source(message: Message) -> PortraitSource | None:
+    """Return the portrait upload carried by ``message``, if any.
 
-    Selects the highest-resolution entry, checks the size limit *before*
-    download when metadata is present and again on the actual bytes after.
+    The single rule for "is this message a portrait?": a normal photo (always
+    JPEG, largest size wins) or a document explicitly declared as an image.
+    Documents without a media type are *not* guessed from their file name -
+    schemas over heuristics (TECH.md) - and non-image documents are nudged
+    exactly like plain text.
+
+    Photo wins if a message somehow carries both (Telegram never sends both).
+    """
+    if message.photo:
+        largest = select_photo_size(message.photo)
+        return PortraitSource(
+            file_id=largest.file_id,
+            mime_type=PHOTO_MIME_TYPE,
+            file_size=largest.file_size,
+            kind="photo",
+        )
+    document = message.document
+    if document is None or document.mime_type is None:
+        return None
+    if not document.mime_type.startswith(IMAGE_MEDIA_TYPE_PREFIX):
+        return None
+    return PortraitSource(
+        file_id=document.file_id,
+        mime_type=document.mime_type,
+        file_size=document.file_size,
+        kind="document",
+    )
+
+
+@log_async_call(logger)
+async def fetch_portrait(source: PhotoSource, portrait: PortraitSource) -> bytes:
+    """Download a portrait from Telegram with edge validation (untrusted input).
+
+    One intake for both upload kinds (Phase 4b): the caller passes whatever
+    :func:`portrait_source` decided is the portrait, so the size limit is
+    checked *before* the download (when Telegram declared a size) and again on
+    the actual bytes afterwards.
 
     Args:
         source: Provider for Telegram file bytes (the gateway's client).
-        photo: The Telegram photo-size array from the message.
+        portrait: The eligible upload chosen by :func:`portrait_source`.
 
     Returns:
         The raw image bytes, ready for the vision gate.
 
     Raises:
-        PhotoValidationError: If the photo is missing or exceeds
-            :data:`MAX_PHOTO_BYTES`.
+        PhotoValidationError: If the download exceeds :data:`MAX_PHOTO_BYTES`.
         TelegramApiError: On download failures (raised by ``source``).
     """
-    largest = select_photo_size(photo)
-    if largest.file_size is not None and largest.file_size > MAX_PHOTO_BYTES:
+    if portrait.file_size is not None and portrait.file_size > MAX_PHOTO_BYTES:
         raise PhotoValidationError(
-            f"photo too large: {largest.file_size} bytes > {MAX_PHOTO_BYTES}"
+            f"portrait too large: {portrait.file_size} bytes > {MAX_PHOTO_BYTES}"
         )
-    image_bytes = await source.download_file(largest.file_id)
+    image_bytes = await source.download_file(portrait.file_id)
     if len(image_bytes) > MAX_PHOTO_BYTES:
         raise PhotoValidationError(
-            f"photo too large: {len(image_bytes)} bytes > {MAX_PHOTO_BYTES}"
+            f"portrait too large: {len(image_bytes)} bytes > {MAX_PHOTO_BYTES}"
         )
     return image_bytes

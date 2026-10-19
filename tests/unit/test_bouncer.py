@@ -7,11 +7,12 @@ download failures reuse the typed Telegram errors from the gateway.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 import pytest
 
 from telegram_documentaries import bot_gateway, bouncer
-from telegram_documentaries.models import PhotoSize
+from telegram_documentaries.models import Message, PhotoSize, PortraitSource
 
 
 def photo_sizes(
@@ -38,6 +39,24 @@ def photo_sizes(
     ]
 
 
+def photo_payload() -> list[dict[str, object]]:
+    """Raw Telegram photo array (as JSON), largest last."""
+    return [
+        {
+            "file_id": "p1-small",
+            "file_unique_id": "u1",
+            "width": 90,
+            "height": 90,
+        },
+        {
+            "file_id": "p2-large",
+            "file_unique_id": "u2",
+            "width": 640,
+            "height": 480,
+        },
+    ]
+
+
 class StubSource:
     """PhotoSource stub recording which file was requested."""
 
@@ -57,24 +76,34 @@ class StubSource:
         return self.data
 
 
-class TestFetchPhoto:
+class TestFetchPortrait:
+    """One intake for photos and image documents (Phase 4b).
+
+    The *choice* of portrait lives in ``portrait_source`` (tested below); this
+    tests the transfer and its edge guards: the declared size is checked before
+    any download, and the real bytes are checked again afterwards.
+    """
+
+    @staticmethod
+    def source(
+        *,
+        file_id: str = "p2-large",
+        mime_type: str = "image/png",
+        file_size: int | None = None,
+        kind: Literal["photo", "document"] = "photo",
+    ) -> PortraitSource:
+        return PortraitSource(
+            file_id=file_id, mime_type=mime_type, file_size=file_size, kind=kind
+        )
+
     @pytest.mark.asyncio
-    async def test_downloads_the_largest_photo_size(self) -> None:
-        source = StubSource(data=b"LARGEST-BYTES")
+    async def test_downloads_the_chosen_portrait(self) -> None:
+        source = StubSource(data=b"ORIGINAL-BYTES")
 
-        result = await bouncer.fetch_photo(source, photo_sizes())
+        result = await bouncer.fetch_portrait(source, self.source())
 
-        assert result == b"LARGEST-BYTES"
+        assert result == b"ORIGINAL-BYTES"
         assert source.requested == ["p2-large"]
-
-    @pytest.mark.asyncio
-    async def test_empty_photo_list_fails_loudly(self) -> None:
-        source = StubSource()
-
-        with pytest.raises(bouncer.PhotoValidationError):
-            await bouncer.fetch_photo(source, [])
-
-        assert source.requested == []
 
     @pytest.mark.asyncio
     async def test_oversized_by_metadata_never_downloads(self) -> None:
@@ -82,7 +111,7 @@ class TestFetchPhoto:
         oversized = bouncer.MAX_PHOTO_BYTES + 1
 
         with pytest.raises(bouncer.PhotoValidationError):
-            await bouncer.fetch_photo(source, photo_sizes(file_size=oversized))
+            await bouncer.fetch_portrait(source, self.source(file_size=oversized))
 
         # Edge guard: untrusted input is checked *before* any transfer.
         assert source.requested == []
@@ -93,14 +122,14 @@ class TestFetchPhoto:
         source = StubSource(data=b"x" * (bouncer.MAX_PHOTO_BYTES + 1))
 
         with pytest.raises(bouncer.PhotoValidationError):
-            await bouncer.fetch_photo(source, photo_sizes(file_size=None))
+            await bouncer.fetch_portrait(source, self.source())
 
     @pytest.mark.asyncio
     async def test_download_failure_propagates_as_typed_error(self) -> None:
         source = StubSource(error=bot_gateway.TelegramApiError("getFile failed"))
 
         with pytest.raises(bot_gateway.TelegramApiError):
-            await bouncer.fetch_photo(source, photo_sizes())
+            await bouncer.fetch_portrait(source, self.source())
 
     @pytest.mark.asyncio
     async def test_failures_are_logged_loudly_by_name(
@@ -113,15 +142,108 @@ class TestFetchPhoto:
             caplog.at_level(logging.DEBUG),
             pytest.raises(bot_gateway.TelegramApiError),
         ):
-            await bouncer.fetch_photo(source, photo_sizes())
+            await bouncer.fetch_portrait(source, self.source())
 
         warnings = [
             record.getMessage()
             for record in caplog.records
             if record.levelno >= logging.WARNING
         ]
-        assert any("fetch_photo" in message for message in warnings)
+        assert any("fetch_portrait" in message for message in warnings)
         assert any("TelegramApiError" in message for message in warnings)
+
+
+class TestPortraitSource:
+    """One predicate decides "is this message a portrait?" (Phase 4b).
+
+    Photos still win when both are present, but the eligible-upload rule lives
+    in a single place so routing can never disagree with the stage.
+    """
+
+    @staticmethod
+    def _message(**fields: object) -> Message:
+        return Message.model_validate(
+            {
+                "message_id": 1,
+                "date": 1_700_000_000,
+                "chat": {"id": 555, "type": "private"},
+                **fields,
+            }
+        )
+
+    def test_photo_message_yields_the_largest_size_as_source(self) -> None:
+        source = bouncer.portrait_source(self._message(photo=photo_payload()))
+
+        assert source is not None
+        assert source.file_id == "p2-large"
+        assert source.mime_type == "image/jpeg"
+        assert source.kind == "photo"
+
+    def test_image_document_yields_a_source_with_its_own_metadata(self) -> None:
+        source = bouncer.portrait_source(
+            self._message(
+                document={
+                    "file_id": "doc-1",
+                    "file_unique_id": "u-doc-1",
+                    "file_name": "portrait.png",
+                    "mime_type": "image/png",
+                    "file_size": 2_048_000,
+                }
+            )
+        )
+
+        assert source is not None
+        assert source.file_id == "doc-1"
+        assert source.mime_type == "image/png"
+        assert source.file_size == 2_048_000
+        assert source.kind == "document"
+
+    def test_photo_wins_when_a_message_carries_both(self) -> None:
+        source = bouncer.portrait_source(
+            self._message(
+                photo=photo_payload(),
+                document={
+                    "file_id": "doc-1",
+                    "file_unique_id": "u-doc-1",
+                    "mime_type": "image/png",
+                },
+            )
+        )
+
+        assert source is not None
+        assert source.file_id == "p2-large"
+
+    def test_non_image_document_is_not_a_portrait(self) -> None:
+        source = bouncer.portrait_source(
+            self._message(
+                document={
+                    "file_id": "doc-2",
+                    "file_unique_id": "u-doc-2",
+                    "file_name": "rules.pdf",
+                    "mime_type": "application/pdf",
+                }
+            )
+        )
+
+        assert source is None
+
+    def test_document_without_a_media_type_is_not_guessed_from_the_name(self) -> None:
+        """Schemas over heuristics: an unflagged file is not a portrait."""
+        source = bouncer.portrait_source(
+            self._message(
+                document={
+                    "file_id": "doc-3",
+                    "file_unique_id": "u-doc-3",
+                    "file_name": "portrait.png",
+                }
+            )
+        )
+
+        assert source is None
+
+    def test_text_and_caption_messages_are_not_portraits(self) -> None:
+        assert bouncer.portrait_source(self._message(text="hello")) is None
+        assert bouncer.portrait_source(self._message(caption="my best")) is None
 
 
 class TestSelectPhotoSize:

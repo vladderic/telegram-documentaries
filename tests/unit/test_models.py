@@ -50,6 +50,25 @@ PHOTO_UPDATE: dict[str, object] = {
 }
 
 
+DOCUMENT_UPDATE = {
+    "update_id": 9002,
+    "message": {
+        "message_id": 8,
+        "date": 1_700_000_000,
+        "chat": {"id": 555, "type": "private"},
+        "from": {"id": 555, "is_bot": False, "first_name": "Ada"},
+        "document": {
+            "file_id": "doc-1",
+            "file_unique_id": "u-doc-1",
+            "file_name": "portrait.png",
+            "mime_type": "image/png",
+            "file_size": 2_048_000,
+            "thumbnail": {"file_id": "ignored"},
+        },
+    },
+}
+
+
 class TestParseValidUpdates:
     def test_parses_text_message_update_into_typed_models(self) -> None:
         update = Update.model_validate(TEXT_UPDATE)
@@ -74,6 +93,40 @@ class TestParseValidUpdates:
         assert update.message.photo is not None
         assert [photo.file_id for photo in update.message.photo] == ["small", "big"]
         assert update.message.photo[-1].width == 800
+
+    def test_parses_document_message_update(self) -> None:
+        update = Update.model_validate(DOCUMENT_UPDATE)
+
+        assert update.message is not None
+        assert update.message.document is not None
+        assert update.message.document.file_id == "doc-1"
+        assert update.message.document.mime_type == "image/png"
+        assert update.message.document.file_size == 2_048_000
+
+    def test_document_optional_fields_default_to_none(self) -> None:
+        update = Update.model_validate(
+            {
+                "update_id": 9003,
+                "message": {
+                    "message_id": 9,
+                    "date": 1_700_000_001,
+                    "chat": {"id": 555, "type": "private"},
+                    "document": {"file_id": "d2", "file_unique_id": "u-d2"},
+                },
+            }
+        )
+
+        assert update.message is not None
+        assert update.message.document is not None
+        assert update.message.document.mime_type is None
+        assert update.message.document.file_name is None
+        assert update.message.document.file_size is None
+
+    def test_photo_message_has_no_document(self) -> None:
+        update = Update.model_validate(PHOTO_UPDATE)
+
+        assert update.message is not None
+        assert update.message.document is None
 
     def test_unknown_update_kind_yields_none_message(self) -> None:
         """Telegram sends update kinds we do not model yet (e.g. edited_message).

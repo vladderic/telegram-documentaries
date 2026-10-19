@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from telegram_documentaries import bot_gateway
+from telegram_documentaries import bot_gateway, bouncer
 from telegram_documentaries.gemini import GeminiApiError
 from telegram_documentaries.models import (
     BehaviouralProfile,
@@ -72,6 +72,34 @@ def photo_update(update_id: int, chat_id: int) -> Update:
             },
         }
     )
+
+
+def document_update(
+    update_id: int,
+    chat_id: int,
+    *,
+    mime_type: str | None = "image/png",
+    file_size: int | None = 2_048_000,
+    file_name: str | None = "portrait.png",
+    caption: str | None = None,
+) -> Update:
+    """A portrait sent as a *file*: Telegram preserves the original bytes."""
+    message: dict[str, object] = {
+        "message_id": update_id,
+        "date": 1_760_000_100,
+        "chat": {"id": chat_id, "type": "private"},
+        "from": {"id": chat_id, "is_bot": False, "first_name": "Ada"},
+        "document": {
+            "file_id": f"d{update_id}",
+            "file_unique_id": f"du{update_id}",
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "file_size": file_size,
+        },
+    }
+    if caption is not None:
+        message["caption"] = caption
+    return Update.model_validate({"update_id": update_id, "message": message})
 
 
 def text_update(
@@ -248,6 +276,15 @@ FINISH_UPDATES = [
     ],
 ]
 
+#: The five answers that push an interview past its ceiling.
+ANSWER_UPDATES = [
+    text_update(2, 555, "A1"),
+    text_update(3, 555, "A2"),
+    text_update(4, 555, "A3"),
+    text_update(5, 555, "A4"),
+    text_update(6, 555, "A5"),
+]
+
 
 class TestFinishRoutesReachTheConverter:
     @pytest.mark.asyncio
@@ -346,6 +383,192 @@ class TestFinishRoutesReachTheConverter:
         stored = Path(tmp_path, "555", "portrait.jpg")
         assert stored.read_bytes() == PORTRAIT_BYTES
         assert converter.calls[0].portrait == stored.read_bytes()
+
+
+class TestDocumentPortrait:
+    """Phase 4b: a file portrait goes through the exact same door as a photo."""
+
+    @pytest.mark.asyncio
+    async def test_the_log_says_which_kind_of_upload_arrived(
+        self, tmp_path: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Live validation reads the log: the kind must be there to read."""
+        vision = AsyncMock()
+        vision.check_photo = AsyncMock(return_value=ACCEPT_VERDICT)
+        vision.close = AsyncMock()
+
+        with caplog.at_level("INFO"):
+            await run_updates(
+                [[document_update(1, 555, mime_type="image/png")]],
+                interviewer=model_finish_script(),
+                converter=FakeConverter(),
+                send=new_send(),
+                send_photo=new_send_photo(),
+                media_root=str(tmp_path),
+                vision=vision,
+            )
+
+        received = [
+            r.getMessage()
+            for r in caplog.records
+            if "portrait_received" in r.getMessage()
+        ]
+        assert len(received) == 1
+        assert "kind=document" in received[0]
+        assert "mime=image/png" in received[0]
+        # Both raw flags are logged, so "photo wins" can never hide a file.
+        assert "has_document=True" in received[0]
+        assert "has_photo=False" in received[0]
+
+    @pytest.mark.asyncio
+    async def test_a_file_portrait_is_accepted_stored_and_passed_on_truthfully(
+        self, tmp_path: Any
+    ) -> None:
+        send = new_send()
+        send_photo = new_send_photo()
+        converter = FakeConverter()
+        interviewer = model_finish_script()
+        vision = AsyncMock()
+        vision.check_photo = AsyncMock(return_value=ACCEPT_VERDICT)
+        vision.close = AsyncMock()
+
+        await run_updates(
+            [
+                [
+                    document_update(
+                        1, 555, mime_type="image/png", file_name="portrait.png"
+                    )
+                ],
+                ANSWER_UPDATES,
+            ],
+            interviewer=interviewer,
+            converter=converter,
+            send=send,
+            send_photo=send_photo,
+            media_root=str(tmp_path),
+            vision=vision,
+        )
+
+        # Same door: hold line, one vision call, the verdict, the interview.
+        assert sent_texts(send)[0] == bot_gateway.PHOTO_HOLD_MSG
+        assert vision.check_photo.await_args.args == (PORTRAIT_BYTES, "image/png")
+        # Original bytes stored under an extension that matches their type.
+        stored = Path(tmp_path, "555", "portrait.png")
+        assert stored.read_bytes() == PORTRAIT_BYTES
+        # The Converter is told what the file actually is, not "image/jpeg".
+        assert converter.calls[0].mime_type == "image/png"
+        assert converter.calls[0].portrait == PORTRAIT_BYTES
+        assert send_photo.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_document_without_an_image_type_gets_the_photo_nudge(
+        self, tmp_path: Any
+    ) -> None:
+        send = new_send()
+        vision = AsyncMock()
+        vision.check_photo = AsyncMock(return_value=ACCEPT_VERDICT)
+        vision.close = AsyncMock()
+
+        await run_updates(
+            [
+                [
+                    document_update(
+                        1, 555, mime_type="application/pdf", file_name="cv.pdf"
+                    )
+                ]
+            ],
+            interviewer=model_finish_script(),
+            converter=FakeConverter(),
+            send=send,
+            send_photo=new_send_photo(),
+            media_root=str(tmp_path),
+            vision=vision,
+        )
+
+        assert sent_texts(send) == [bot_gateway.PHOTO_NUDGE]
+        vision.check_photo.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_oversized_document_is_refused_before_the_vision_call(
+        self, tmp_path: Any
+    ) -> None:
+        send = new_send()
+        vision = AsyncMock()
+        vision.check_photo = AsyncMock(return_value=ACCEPT_VERDICT)
+        vision.close = AsyncMock()
+
+        await run_updates(
+            [
+                [
+                    document_update(
+                        1,
+                        555,
+                        file_size=bouncer.MAX_PHOTO_BYTES + 1,
+                        file_name="huge.png",
+                    )
+                ]
+            ],
+            interviewer=model_finish_script(),
+            converter=FakeConverter(),
+            send=send,
+            send_photo=new_send_photo(),
+            media_root=str(tmp_path),
+            vision=vision,
+        )
+
+        assert bot_gateway.PHOTO_TOO_LARGE_MSG in sent_texts(send)
+        # No transfer, no judgment: the cap is enforced on the declared size.
+        vision.check_photo.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_document_mid_interview_is_still_not_an_answer(
+        self, tmp_path: Any
+    ) -> None:
+        send = new_send()
+        vision = AsyncMock()
+        vision.check_photo = AsyncMock(return_value=ACCEPT_VERDICT)
+        vision.close = AsyncMock()
+        interviewer = FakeInterviewer(questions=["First question?", "Second question?"])
+
+        await run_updates(
+            [
+                [photo_update(1, 555)],
+                [document_update(2, 555)],
+                [text_update(3, 555, "A1")],
+            ],
+            interviewer=interviewer,
+            converter=FakeConverter(),
+            send=send,
+            send_photo=new_send_photo(),
+            media_root=str(tmp_path),
+            vision=vision,
+        )
+
+        texts = sent_texts(send)
+        assert texts[-2] == f"{bot_gateway.INTERVIEW_NUDGE}\n\nFirst question?"
+        assert texts[-1] == "Second question?"
+
+    @pytest.mark.asyncio
+    async def test_a_document_after_the_portrait_gets_the_holding_reply(
+        self, tmp_path: Any
+    ) -> None:
+        send = new_send()
+        vision = AsyncMock()
+        vision.check_photo = AsyncMock(return_value=ACCEPT_VERDICT)
+        vision.close = AsyncMock()
+
+        await run_updates(
+            FINISH_UPDATES + [[document_update(7, 555)]],
+            interviewer=model_finish_script(),
+            converter=FakeConverter(),
+            send=send,
+            send_photo=new_send_photo(),
+            media_root=str(tmp_path),
+            vision=vision,
+        )
+
+        assert sent_texts(send)[-1] == bot_gateway.LATER_PHASE_REPLY
+        assert vision.check_photo.await_count == 1
 
 
 class TestPortraitFailurePaths:
