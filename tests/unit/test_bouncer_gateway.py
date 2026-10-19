@@ -178,6 +178,50 @@ def sent_texts(send: AsyncMock) -> list[str]:
 
 class TestPhotoFlow:
     @pytest.mark.asyncio
+    async def test_photo_arrival_is_acknowledged_before_the_slow_work(
+        self, tmp_path: Any
+    ) -> None:
+        """Downloading and judging takes seconds: never leave the user in silence.
+
+        Live validation: the reply could take ages with no feedback at all.
+        """
+        send = AsyncMock(return_value={"ok": True})
+        vision = make_vision(result=ACCEPT_VERDICT)
+        download = AsyncMock(return_value=b"JPEG-BYTES")
+
+        await run_with_mocks(
+            [[photo_update(1, 555)], []],
+            vision=vision,
+            download=download,
+            send=send,
+            media_root=str(tmp_path),
+        )
+
+        assert sent_texts(send) == [
+            bot_gateway.PHOTO_HOLD_MSG,
+            ACCEPT_VERDICT.message,
+            FIRST_QUESTION,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_rejected_photo_is_also_acknowledged_first(
+        self, tmp_path: Any
+    ) -> None:
+        send = AsyncMock(return_value={"ok": True})
+        vision = make_vision(result=REJECT_VERDICT)
+        download = AsyncMock(return_value=b"JPEG-BYTES")
+
+        await run_with_mocks(
+            [[photo_update(1, 555)], []],
+            vision=vision,
+            download=download,
+            send=send,
+            media_root=str(tmp_path),
+        )
+
+        assert sent_texts(send) == [bot_gateway.PHOTO_HOLD_MSG, REJECT_VERDICT.message]
+
+    @pytest.mark.asyncio
     async def test_accepted_photo_is_stored_and_advances_the_phase(
         self, tmp_path: Any
     ) -> None:
@@ -196,6 +240,7 @@ class TestPhotoFlow:
         )
 
         assert sent_texts(send) == [
+            bot_gateway.PHOTO_HOLD_MSG,
             ACCEPT_VERDICT.message,
             FIRST_QUESTION,
             f"{bot_gateway.INTERVIEW_NUDGE}\n\n{FIRST_QUESTION}",
@@ -222,7 +267,9 @@ class TestPhotoFlow:
         )
 
         assert sent_texts(send) == [
+            bot_gateway.PHOTO_HOLD_MSG,
             REJECT_VERDICT.message,
+            bot_gateway.PHOTO_HOLD_MSG,
             ACCEPT_VERDICT.message,
             FIRST_QUESTION,
         ]
@@ -247,7 +294,7 @@ class TestPhotoFlow:
             media_root=str(tmp_path),
         )
 
-        assert sent_texts(send) == [REJECT_VERDICT.message]
+        assert sent_texts(send) == [bot_gateway.PHOTO_HOLD_MSG, REJECT_VERDICT.message]
         assert not (tmp_path / "777").exists()
 
     @pytest.mark.asyncio
@@ -269,6 +316,7 @@ class TestPhotoFlow:
             )
 
         assert sent_texts(send) == [
+            bot_gateway.PHOTO_HOLD_MSG,
             bot_gateway.BOUNCER_RETRY_MSG,
             bot_gateway.PHOTO_NUDGE,
         ]
@@ -297,7 +345,10 @@ class TestPhotoFlow:
             media_root=str(tmp_path),
         )
 
-        assert sent_texts(send) == [bot_gateway.PHOTO_TOO_LARGE_MSG]
+        assert sent_texts(send) == [
+            bot_gateway.PHOTO_HOLD_MSG,
+            bot_gateway.PHOTO_TOO_LARGE_MSG,
+        ]
         download.assert_not_awaited()
         vision.check_photo.assert_not_awaited()
 

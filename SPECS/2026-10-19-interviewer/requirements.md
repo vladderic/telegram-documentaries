@@ -40,8 +40,10 @@ stage's entry point; extra input gets the holding reply).
 
 | Situation | Behaviour |
 |---|---|
+| A photo arrives (Bouncer's phase) | Send an immediate in-character hold-line, *then* download and judge (a stalled transfer must never look like silence) |
 | Bouncer accepts a photo | Send the acceptance confirmation, then immediately ask **Q1**; phase → `INTERVIEW` |
 | Text while a question is pending | Treated as the answer. Append the pair, then ask the next question — or finish if the model says so / the cap is reached |
+| Text timestamped *before* the pending question (already queued when it went out) | Same as non-text: nudge + repeat; the message is **not** recorded as an answer |
 | Text while `INTERVIEW` but no pending question (only after a failed model call) | Re-ask the next question; do **not** record the text as an answer |
 | Sticker / photo / voice / document while a question is pending | In-character nudge + repeat the pending question; no state change |
 | Empty / whitespace-only text | Same as non-text: nudge + repeat; no state change |
@@ -58,12 +60,19 @@ stage's entry point; extra input gets the holding reply).
 - `BehaviouralProfile` — `profile: str` (rich text, the stage's output),
   `suggested_animal: str` (a real animal species — the Converter's input).
 - `InterviewState` (nested in `SessionState`) — `answers: list[InterviewAnswer]`,
-  `pending_question: str | None`, `profile: BehaviouralProfile | None`.
+  `pending_question: str | None`, `profile: BehaviouralProfile | None`,
+  `question_sent_at: float | None` (unix seconds stamped when the pending
+  question reached the user; drives the queued-message guard below).
   - **Deterministic derivation, single source of truth:** the question number a
     user is answering is `len(answers) + 1`; "finished" means `profile is not
     None`. No redundant counters that can drift.
 - The pending answer is recorded **only** once the next step resolves — so a
   retry after a failure re-sends the same answer without duplicating it.
+- A message is an answer only if it arrived after the question did: if
+  `message.date` predates `question_sent_at` by more than a small clock-slack
+  margin (Telegram timestamps have 1s resolution and clocks can differ), it is
+  nudged and the question repeated instead of being recorded. This refuses a
+  message the user had already queued when the question went out.
 
 ### The three model calls (all against the shared client)
 
@@ -101,6 +110,16 @@ Threshold enforcement lives in the gateway's state machine, not in the model.
   never raw bytes.
 - Failures follow TECH.md: log loudly, degrade in-character, never raise into
   the conversation, never lose collected answers.
+
+### HTTP timeouts (Telegram calls)
+
+- Ordinary Bot API calls use a short read timeout (15s) so a stalled request
+  degrades in seconds; only `getUpdates` gets the long-poll window (poll
+  timeout + head-room). Sharing one poll-sized timeout let a single stalled
+  `getFile` freeze a reply for 38s (live-validation finding).
+- Idempotent GETs (`getFile`, the file download) are retried **once** on a
+  transport timeout; `sendMessage` is never retried (a retry could post the
+  same message twice). Failures raise the typed, token-free `TelegramApiError`.
 
 ### Scope cuts (YAGNI)
 

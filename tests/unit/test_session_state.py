@@ -49,6 +49,16 @@ class TestInterviewState:
         assert state.interview.answers == []
         assert state.interview.pending_question is None
         assert state.interview.profile is None
+        assert state.interview.question_sent_at is None
+
+    def test_clear_resets_the_question_send_time(self) -> None:
+        state = SessionState(chat_id=123, phase=Phase.INTERVIEW)
+        state.interview.pending_question = "Q1?"
+        state.interview.question_sent_at = 1_760_000_000.0
+
+        state.clear()
+
+        assert state.interview.question_sent_at is None
 
     def test_derives_the_next_question_number_from_the_answers(self) -> None:
         """Single source of truth: no stored counter that could drift."""

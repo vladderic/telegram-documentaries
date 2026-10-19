@@ -266,6 +266,11 @@ class InterviewState(BaseModel):
     answers: list[InterviewAnswer] = Field(default_factory=list)
     pending_question: str | None = None
     profile: BehaviouralProfile | None = None
+    #: Unix wall-clock seconds when ``pending_question`` reached the user, or
+    #: ``None`` while nothing is pending. Used to reject messages that predate
+    #: the question (live finding: a message already queued when the question
+    #: was sent got recorded as the answer 0.4s later).
+    question_sent_at: float | None = None
 
     model_config = {
         "extra": "ignore",

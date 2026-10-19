@@ -39,6 +39,11 @@ DISTILLED_PROFILE = BehaviouralProfile(
     profile="The subject patrols the kitchen at midnight, seeking snacks.",
     suggested_animal="Red fox",
 )
+#: Immediate acknowledgement the photo flow sends while it downloads + judges.
+PHOTO_HOLD = bot_gateway.PHOTO_HOLD_MSG
+#: The clock the gateway sees in these tests: just before every fixture date,
+#: so normal answers are unambiguously "after" the question they answer.
+DEFAULT_NOW = 1_760_000_000.0
 
 
 def photo_update(update_id: int, chat_id: int) -> Update:
@@ -64,13 +69,19 @@ def photo_update(update_id: int, chat_id: int) -> Update:
     )
 
 
-def text_update(update_id: int, chat_id: int, text: str) -> Update:
+def text_update(
+    update_id: int,
+    chat_id: int,
+    text: str,
+    *,
+    date: int = 1_760_000_200,
+) -> Update:
     return Update.model_validate(
         {
             "update_id": update_id,
             "message": {
                 "message_id": update_id,
-                "date": 1_760_000_200,
+                "date": date,
                 "chat": {"id": chat_id, "type": "private"},
                 "from": {"id": chat_id, "is_bot": False, "first_name": "Ada"},
                 "text": text,
@@ -179,8 +190,12 @@ async def run_updates(
     media_root: str,
     vision: AsyncMock | None = None,
     download: AsyncMock | None = None,
+    now: float = DEFAULT_NOW,
 ) -> None:
     """Run ``run_bot`` with Telegram, the Bouncer and the Interviewer mocked.
+
+    ``bot_gateway._now`` is pinned to ``now`` so the stale-message guard is
+    deterministic (it otherwise compares against the real wall clock).
 
     Must be awaited *inside* the patch context (see test_bouncer_gateway.py).
     """
@@ -200,6 +215,7 @@ async def run_updates(
         patch.object(bot_gateway, "TelegramClient", return_value=mock_client),
         patch.object(bot_gateway, "GeminiVisionClient", return_value=vision),
         patch.object(bot_gateway, "InterviewerClient", return_value=interviewer),
+        patch.object(bot_gateway, "_now", return_value=now),
     ):
         await bot_gateway.run_bot(
             poll_timeout=0,
@@ -233,7 +249,11 @@ class TestAcceptStartsTheInterview:
             media_root=str(tmp_path),
         )
 
-        assert sent_texts(send) == [ACCEPT_VERDICT.message, "What is your habitat?"]
+        assert sent_texts(send) == [
+            PHOTO_HOLD,
+            ACCEPT_VERDICT.message,
+            "What is your habitat?",
+        ]
         assert interviewer.methods == ["next_question"]
         first_call = interviewer.calls[0]
         assert first_call.answer is None
@@ -255,6 +275,7 @@ class TestAcceptStartsTheInterview:
         )
 
         assert sent_texts(send) == [
+            PHOTO_HOLD,
             ACCEPT_VERDICT.message,
             "What is your habitat?",
             f"{bot_gateway.INTERVIEW_NUDGE}\n\nWhat is your habitat?",
@@ -282,6 +303,7 @@ class TestAnswerRouting:
         )
 
         assert sent_texts(send) == [
+            PHOTO_HOLD,
             ACCEPT_VERDICT.message,
             "Q1?",
             "Q2?",
@@ -335,14 +357,15 @@ class TestAnswerRouting:
         )
 
         texts = sent_texts(send)
-        assert texts[:2] == [ACCEPT_VERDICT.message, "Q1?"]
-        assert texts[5] == "Q5?"
-        assert texts[6] == bot_gateway.PROFILE_REVEAL_TEMPLATE.format(
+        assert texts[0] == PHOTO_HOLD
+        assert texts[1:3] == [ACCEPT_VERDICT.message, "Q1?"]
+        assert texts[6] == "Q5?"
+        assert texts[7] == bot_gateway.PROFILE_REVEAL_TEMPLATE.format(
             profile=finish.profile,
             animal=finish.suggested_animal,
         )
         # Phase advanced to CONVERT: the next message gets the holding reply.
-        assert texts[7] == bot_gateway.LATER_PHASE_REPLY
+        assert texts[8] == bot_gateway.LATER_PHASE_REPLY
         assert interviewer.methods[-1] == "next_step"
         assert interviewer.methods.count("next_step") == 1
         assert interviewer.methods.count("distil") == 0
@@ -417,6 +440,7 @@ class TestNonTextInput:
 
         nudge = f"{bot_gateway.INTERVIEW_NUDGE}\n\nQ1?"
         assert sent_texts(send) == [
+            PHOTO_HOLD,
             ACCEPT_VERDICT.message,
             "Q1?",
             nudge,
@@ -436,6 +460,89 @@ class TestNonTextInput:
         assert interviewer.calls[2].interview.answers == [
             InterviewAnswer(question="Q1?", answer="A1")
         ]
+
+
+class TestStaleMessageGuard:
+    """Messages that predate the pending question are refused, not recorded."""
+
+    @pytest.mark.asyncio
+    async def test_message_queued_before_the_question_is_not_recorded(
+        self, tmp_path: Any
+    ) -> None:
+        """A message already in flight when Q1 went out cannot be its answer.
+
+        Live finding: text the user had queued before Q1 was retried was
+        recorded as the answer 0.4s after the question was sent.
+        """
+        send = new_send()
+        interviewer = FakeInterviewer(questions=["Q1?", "Q2?", "Q3?"])
+        queued = int(DEFAULT_NOW) - 10  # written before the question existed
+
+        await run_updates(
+            [
+                [photo_update(1, 555)],
+                [text_update(2, 555, "I already told you", date=queued)],
+                [text_update(3, 555, "A1")],
+            ],
+            interviewer=interviewer,
+            send=send,
+            media_root=str(tmp_path),
+        )
+
+        assert sent_texts(send) == [
+            PHOTO_HOLD,
+            ACCEPT_VERDICT.message,
+            "Q1?",
+            f"{bot_gateway.INTERVIEW_NUDGE}\n\nQ1?",
+            "Q2?",
+        ]
+        # Only the fresh message was ever an answer; the queued one was not.
+        assert [call.answer for call in interviewer.calls] == [None, "A1"]
+
+    @pytest.mark.asyncio
+    async def test_message_within_the_clock_slack_is_still_an_answer(
+        self, tmp_path: Any
+    ) -> None:
+        """Telegram's 1s timestamps and clock skew must not eat real answers."""
+        send = new_send()
+        interviewer = FakeInterviewer(questions=["Q1?", "Q2?"])
+        near_question = int(DEFAULT_NOW) - 2  # inside QUESTION_CLOCK_SLACK_SECONDS
+
+        await run_updates(
+            [
+                [photo_update(1, 555)],
+                [text_update(2, 555, "A1", date=near_question)],
+            ],
+            interviewer=interviewer,
+            send=send,
+            media_root=str(tmp_path),
+        )
+
+        assert sent_texts(send) == [
+            PHOTO_HOLD,
+            ACCEPT_VERDICT.message,
+            "Q1?",
+            "Q2?",
+        ]
+        assert [call.answer for call in interviewer.calls] == [None, "A1"]
+
+    @pytest.mark.asyncio
+    async def test_question_send_time_is_stamped_when_the_question_goes_out(
+        self, tmp_path: Any
+    ) -> None:
+        send = new_send()
+        interviewer = FakeInterviewer(questions=["Q1?", "Q2?"])
+
+        await run_updates(
+            [[photo_update(1, 555)], [text_update(2, 555, "A1")]],
+            interviewer=interviewer,
+            send=send,
+            media_root=str(tmp_path),
+        )
+
+        # Nothing pending at the first call; stamped once Q1 reached the user.
+        assert interviewer.calls[0].interview.question_sent_at is None
+        assert interviewer.calls[1].interview.question_sent_at == DEFAULT_NOW
 
 
 class TestFailureBehaviour:
@@ -464,6 +571,7 @@ class TestFailureBehaviour:
         )
 
         assert sent_texts(send) == [
+            PHOTO_HOLD,
             ACCEPT_VERDICT.message,
             "Q1?",
             bot_gateway.INTERVIEW_RETRY_MSG,
@@ -506,6 +614,7 @@ class TestFailureBehaviour:
         )
 
         assert sent_texts(send) == [
+            PHOTO_HOLD,
             ACCEPT_VERDICT.message,
             bot_gateway.INTERVIEW_RETRY_MSG,
             "Q1?",
@@ -527,6 +636,7 @@ class TestFailureBehaviour:
     ) -> None:
         send = AsyncMock(
             side_effect=[
+                {"ok": True},  # photo hold-line
                 {"ok": True},  # acceptance confirmation
                 bot_gateway.TelegramApiError("sendMessage failed"),  # Q1 fails
                 {"ok": True},  # Q1 re-asked after the user's next message
@@ -550,7 +660,13 @@ class TestFailureBehaviour:
 
         # The Q1 send failed mid-flight (its text is recorded by the mock),
         # but the user never received it - so the next message re-asks it.
-        assert sent_texts(send) == [ACCEPT_VERDICT.message, "Q1?", "Q1?", "Q2?"]
+        assert sent_texts(send) == [
+            PHOTO_HOLD,
+            ACCEPT_VERDICT.message,
+            "Q1?",
+            "Q1?",
+            "Q2?",
+        ]
         # The question that never reached the user was never made pending, so
         # "chatter" triggered a re-ask (no answer) rather than being recorded.
         assert [call.answer for call in interviewer.calls] == [None, None, "A1"]
@@ -590,8 +706,10 @@ class TestChatIsolationAndLifecycle:
         )
 
         assert sent_texts(send) == [
+            PHOTO_HOLD,
             ACCEPT_VERDICT.message,
             "Q for 555 #1?",
+            PHOTO_HOLD,
             ACCEPT_VERDICT.message,
             "Q for 777 #1?",
             "Q for 555 #2?",

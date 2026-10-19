@@ -292,3 +292,98 @@ class TestDownloadFile:
         with pytest.raises(bot_gateway.TelegramApiError, match="403"):
             await client.download_file("f1")
         await client.close()
+
+
+class TestTimeoutsAndRetries:
+    """A stalled request must not freeze the reply for the whole poll timeout.
+
+    Live validation: one `getFile` call hung for 38s because every request
+    shared the 40s long-poll read timeout, with no feedback to the user.
+    """
+
+    @pytest.mark.asyncio
+    async def test_poll_uses_the_long_timeout_while_api_calls_stay_short(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            if request.url.path.endswith("/getUpdates"):
+                return httpx.Response(200, json={"ok": True, "result": []})
+            return httpx.Response(200, json={"ok": True, "result": True})
+
+        client = make_client(handler)
+        try:
+            await client.get_updates(poll_timeout=30)
+            await client.send_message(chat_id=555, text="Hello back")
+        finally:
+            await client.close()
+
+        poll_timeout = seen[0].extensions["timeout"]["read"]
+        send_timeout = seen[1].extensions["timeout"]["read"]
+        assert poll_timeout == 40.0
+        assert send_timeout == bot_gateway.API_TIMEOUT_SECONDS
+        assert send_timeout < poll_timeout
+
+    @pytest.mark.asyncio
+    async def test_stalled_getfile_is_retried_once_and_then_succeeds(self) -> None:
+        attempts = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/getFile"):
+                attempts["count"] += 1
+                if attempts["count"] == 1:
+                    raise httpx.ReadTimeout("stalled")
+                return httpx.Response(
+                    200,
+                    json={"ok": True, "result": {"file_path": "photos/x.jpg"}},
+                )
+            return httpx.Response(200, content=b"JPEG-BYTES")
+
+        client = make_client(handler)
+        try:
+            data = await client.download_file("f1")
+        finally:
+            await client.close()
+
+        assert data == b"JPEG-BYTES"
+        assert attempts["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_stalled_file_download_is_retried_once(self) -> None:
+        attempts = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/getFile"):
+                return httpx.Response(
+                    200,
+                    json={"ok": True, "result": {"file_path": "photos/x.jpg"}},
+                )
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise httpx.ReadTimeout("stalled")
+            return httpx.Response(200, content=b"JPEG-BYTES")
+
+        client = make_client(handler)
+        try:
+            data = await client.download_file("f1")
+        finally:
+            await client.close()
+
+        assert data == b"JPEG-BYTES"
+        assert attempts["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_stalled_send_is_never_retried(self) -> None:
+        attempts = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["count"] += 1
+            raise httpx.ReadTimeout("stalled")
+
+        client = make_client(handler)
+        with pytest.raises(bot_gateway.TelegramApiError, match="ReadTimeout"):
+            await client.send_message(chat_id=555, text="Hello back")
+        await client.close()
+
+        # A retried send could post the same message twice: never do it.
+        assert attempts["count"] == 1

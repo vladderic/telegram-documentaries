@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,15 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
+#: Read timeout for ordinary Bot API calls. Short on purpose: a stalled request
+#: must degrade in-character within seconds, not freeze the reply for the whole
+#: long-poll window (live validation saw one `getFile` hang for 38s).
+API_TIMEOUT_SECONDS = 15.0
+
+#: Extra head-room on top of the long-poll timeout, so a poll never races its
+#: own read timeout.
+POLL_TIMEOUT_HEADROOM = 10.0
+
 #: Where accepted portraits are stored (gitignored; keyed per chat_id).
 DEFAULT_MEDIA_ROOT = ".tmp/media"
 
@@ -86,6 +96,22 @@ INTERVIEW_NUDGE = (
     "The recorder only takes dictation - words, not stickers or silence. "
     "I will ask again:"
 )
+#: Sent the instant a photo arrives: downloading and judging it takes seconds,
+#: and the user should never be left staring at silence (live-validation
+#: finding - one stalled download left the reply hanging for 38s).
+PHOTO_HOLD_MSG = "One moment - the crew is taking a proper look at this one."
+
+#: Safety margin for the answer guard. Telegram timestamps carry a 1s
+#: resolution and the bot's clock need not match the server's, so a message is
+#: only treated as "predating the question" once it is clearly older.
+QUESTION_CLOCK_SLACK_SECONDS = 3.0
+
+
+def _now() -> float:
+    """Current wall-clock time in seconds (patchable seam for tests)."""
+    return time.time()
+
+
 #: The Interviewer's model call failed (API down/timeout): nothing was
 #: recorded, so the same answer can simply be resent.
 INTERVIEW_RETRY_MSG = (
@@ -109,13 +135,19 @@ class TelegramApiError(Exception):
 
 
 class TelegramClient:
-    """Minimal async Telegram Bot API client for long polling."""
+    """Minimal async Telegram Bot API client for long polling.
+
+    Ordinary API calls use the short :data:`API_TIMEOUT_SECONDS` read timeout;
+    only ``getUpdates`` is given the longer long-poll window. Idempotent reads
+    (``getFile``, file downloads) are retried once on a transport timeout;
+    sends never are - a retried send could post the same message twice.
+    """
 
     def __init__(
         self,
         token: str,
         base_url: str = TELEGRAM_API_BASE,
-        timeout: float = 30.0,
+        timeout: float = API_TIMEOUT_SECONDS,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.token = token
@@ -132,20 +164,76 @@ class TelegramClient:
         """Redact the bot token from any text destined for logs/exceptions."""
         return text.replace(self.token, REDACTED)
 
+    def _timeout_error(
+        self, method: str, exc: httpx.TimeoutException
+    ) -> TelegramApiError:
+        """Build the typed error for a timed-out call (token redacted).
+
+        ``from None`` is applied by the caller: chaining would re-print the
+        original exception, whose message can embed the request URL (bot token!).
+        """
+        detail = self._sanitize(str(exc))
+        return TelegramApiError(
+            f"Telegram API {method} failed ({type(exc).__name__}): {detail}"
+        )
+
+    async def _get(
+        self,
+        url: str,
+        *,
+        method: str,
+        params: dict[str, str | int] | None = None,
+        timeout: float,
+        retries: int = 0,
+    ) -> httpx.Response:
+        """GET with an explicit timeout, retrying a stalled request.
+
+        Only transport timeouts are retried (the request is idempotent), and
+        only as many times as the caller allows; any other transport failure
+        propagates to the caller's handler.
+        """
+        for attempt in range(retries + 1):
+            try:
+                return await self._client.get(url, params=params, timeout=timeout)
+            except httpx.TimeoutException as exc:
+                if attempt >= retries:
+                    raise self._timeout_error(method, exc) from None
+                logger.warning(
+                    "Telegram API %s timed out; retrying (%s/%s)",
+                    method,
+                    attempt + 1,
+                    retries + 1,
+                )
+        # Unreachable: the loop either returns or raises - kept for the type.
+        raise TelegramApiError(f"Telegram API {method} failed: no attempt was made")
+
     async def _request(
         self,
         method: str,
         *,
         params: dict[str, str | int] | None = None,
         payload: dict[str, Any] | None = None,
+        timeout: float | None = None,
+        retries: int = 0,
     ) -> Any:
         """Call one Bot API method; failures raise a token-free TelegramApiError."""
         url = f"{self.base_url}/bot{self.token}/{method}"
+        effective_timeout = self.timeout if timeout is None else timeout
         try:
             if payload is not None:
-                response = await self._client.post(url, json=payload)
+                response = await self._client.post(
+                    url, json=payload, timeout=effective_timeout
+                )
             else:
-                response = await self._client.get(url, params=params)
+                response = await self._get(
+                    url,
+                    method=method,
+                    params=params,
+                    timeout=effective_timeout,
+                    retries=retries,
+                )
+        except TelegramApiError:
+            raise
         except httpx.HTTPError as exc:
             detail = self._sanitize(str(exc))
             # `from None`: chaining would re-print the original exception - whose
@@ -182,7 +270,11 @@ class TelegramClient:
         if self._offset is not None:
             params["offset"] = self._offset
 
-        data = await self._request("getUpdates", params=params)
+        data = await self._request(
+            "getUpdates",
+            params=params,
+            timeout=poll_timeout + POLL_TIMEOUT_HEADROOM,
+        )
         if not isinstance(data, dict) or "result" not in data:
             raise TelegramApiError(
                 "Telegram API getUpdates returned an unexpected response shape"
@@ -221,9 +313,10 @@ class TelegramClient:
 
         Raises:
             TelegramApiError: If ``getFile`` returns an unexpected shape or
-                either HTTP call fails, with the bot token redacted.
+                either HTTP call fails, with the bot token redacted. A stalled
+                read is retried once (both calls are idempotent GETs).
         """
-        data = await self._request("getFile", params={"file_id": file_id})
+        data = await self._request("getFile", params={"file_id": file_id}, retries=1)
         if not isinstance(data, dict) or not isinstance(data.get("result"), dict):
             raise TelegramApiError(
                 "Telegram API getFile returned an unexpected response shape"
@@ -236,7 +329,14 @@ class TelegramClient:
 
         url = f"{self.base_url}/file/bot{self.token}/{file_path}"
         try:
-            response = await self._client.get(url)
+            response = await self._get(
+                url,
+                method="file download",
+                timeout=self.timeout,
+                retries=1,
+            )
+        except TelegramApiError:
+            raise
         except httpx.HTTPError as exc:
             detail = self._sanitize(str(exc))
             # `from None`: the original exception could embed the URL with
@@ -349,8 +449,10 @@ async def _ask_question(
     )
     if not await _send(client, chat_id, question):
         return False
-    # Only now is it the question the user is answering.
+    # Only now is it the question the user is answering; stamping the send time
+    # lets the handler reject messages that were already in flight.
     session.interview.pending_question = question
+    session.interview.question_sent_at = _now()
     return True
 
 
@@ -438,13 +540,14 @@ async def _handle_answer(
         return
     if await _send(client, chat_id, question):
         interview.pending_question = question
+        interview.question_sent_at = _now()
 
 
 async def _handle_interview(
     client: TelegramClient,
     interviewer: InterviewerClient,
     session: SessionState,
-    text: str | None,
+    message: Message,
 ) -> None:
     """Route one message that arrived during the interview; never raises.
 
@@ -453,14 +556,18 @@ async def _handle_interview(
     question is pending - only possible after a failed ask - the next question
     is (re)asked and the user's text is never recorded as an answer.
 
+    A message older than the pending question is also refused: a message
+    already queued when the question went out cannot be its answer (live
+    finding - one was recorded 0.4s after Q1 was sent).
+
     Args:
         client: Telegram client for outbound messages.
         interviewer: Interviewer client (the model call).
         session: Session in ``INTERVIEW_PHASES``.
-        text: The message's text, or ``None`` for photo/sticker/voice/etc.
+        message: The incoming message (its text and timestamp are used).
     """
     chat_id = session.chat_id
-    answer = (text or "").strip()
+    answer = "" if message.photo else (message.text or "").strip()
 
     if not answer:
         pending = session.interview.pending_question
@@ -476,9 +583,21 @@ async def _handle_interview(
         await _send(client, chat_id, f"{INTERVIEW_NUDGE}\n\n{pending}")
         return
 
-    if session.interview.pending_question is None:
+    pending = session.interview.pending_question
+    if pending is None:
         logger.info("interview_reask chat_id=%s", chat_id)
         await _ask_question(client, interviewer, session, answer=None)
+        return
+
+    asked_at = session.interview.question_sent_at
+    if asked_at is not None and message.date < asked_at - QUESTION_CLOCK_SLACK_SECONDS:
+        logger.info(
+            "interview_stale_message chat_id=%s date=%s asked_at=%.3f",
+            chat_id,
+            message.date,
+            asked_at,
+        )
+        await _send(client, chat_id, f"{INTERVIEW_NUDGE}\n\n{pending}")
         return
 
     await _handle_answer(client, interviewer, session, answer)
@@ -509,6 +628,11 @@ async def _handle_photo(
 
     log_phase_transition(logger, chat_id, session.phase, Phase.BOUNCER_CHECK)
     session.phase = Phase.BOUNCER_CHECK
+    # Speak up immediately: the download takes seconds and the user must never
+    # be left staring at silence (live finding: one stalled transfer = 38s).
+    # ``_send`` (not a bare call) so a failed courtesy line cannot abort the
+    # flow and strand the session in ``BOUNCER_CHECK``.
+    await _send(client, chat_id, PHOTO_HOLD_MSG)
 
     try:
         image_bytes = await bouncer.fetch_photo(client, message.photo or [])
@@ -623,8 +747,7 @@ async def _dispatch_update(
         if session.phase in INTERVIEW_PHASES:
             # Phase 3: the Interviewer owns this stage. A photo (or any other
             # non-text input) never advances the interview - it only nudges.
-            text = None if update.message.photo else update.message.text
-            await _handle_interview(client, interviewer, session, text)
+            await _handle_interview(client, interviewer, session, update.message)
             return
 
         if update.message.photo:
@@ -689,12 +812,9 @@ async def run_bot(
         shutdown_event = asyncio.Event()
     _install_signal_handlers(shutdown_event)
 
-    # The HTTP read timeout must outlast a single long poll, otherwise every
-    # poll races its own timeout.
-    client = TelegramClient(
-        token=settings.telegram_bot_token,
-        timeout=max(30.0, poll_timeout + 10.0),
-    )
+    # Ordinary API calls fail fast (API_TIMEOUT_SECONDS); only the long poll
+    # gets a longer read timeout, applied inside ``get_updates``.
+    client = TelegramClient(token=settings.telegram_bot_token)
     vision = GeminiVisionClient(api_key=settings.gemini_api_key)
     interviewer = InterviewerClient(api_key=settings.gemini_api_key)
     sessions: dict[int, SessionState] = {}
