@@ -65,8 +65,10 @@ Commits: TG1 `b3c2823` (contract), TG2 `c318123` (`systemInstruction`), TG3
       breaks, ≤90 words (record the `scripter_script words=… chars=…` line and
       the word count of the received text).
 - [ ] `script_delivered` in the log with `words`/`chars`.
-- [ ] The gateway banner reads `(Phase 5 - Scripter)` (restart the bot after
-      this branch is checked out; verify on the first live run).
+- [x] The gateway banner reads `(Phase 5 - Scripter)`.
+      → Bot restarted on this branch: `2026-10-19 15:09:15,505 INFO
+      telegram_documentaries.bot_gateway: Starting Telegram gateway
+      (Phase 5 - Scripter)`, then polling `getUpdates` cleanly.
 - [x] `systemInstruction` is accepted by the live API.
       → Direct `ScripterClient.write_script` call against the real API with a
       canned dossier (no Telegram hop): 200 response, **83 words**, one
