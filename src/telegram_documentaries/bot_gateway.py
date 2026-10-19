@@ -197,9 +197,9 @@ def _upload_filename(mime_type: str) -> str:
     return _UPLOAD_FILENAMES.get(mime_type, "portrait.jpg")
 
 
-def _voice_filename(mime_type: str) -> str:
-    """Upload filename for a voice note; the extension follows the media type."""
-    return "narration.mp3" if mime_type == "audio/mpeg" else "narration.ogg"
+#: Upload filename for every voice note: ``VoiceNote.mime_type`` is pinned to
+#: ``audio/mpeg`` at the typed boundary, so MP3 is the only format possible.
+VOICE_FILENAME = "narration.mp3"
 
 
 class TelegramClient:
@@ -437,7 +437,7 @@ class TelegramClient:
             form={"chat_id": str(chat_id), "duration": str(voice.duration)},
             files={
                 "voice": (
-                    _voice_filename(voice.mime_type),
+                    VOICE_FILENAME,
                     voice.data,
                     voice.mime_type,
                 )
