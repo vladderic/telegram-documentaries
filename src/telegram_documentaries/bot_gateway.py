@@ -935,8 +935,13 @@ async def _dispatch_update(
 
         reply = build_reply(update.message, session)
         if reply is None:
-            await _handle_photo(
-                client, vision, interviewer, session, update.message, media_root
+            # Unreachable: photos were routed above (``build_reply`` returns
+            # None only for a photo). Logged loudly rather than silently
+            # re-running the photo flow - the Phase 3 lesson about a route
+            # that quietly re-enters an earlier stage.
+            logger.error(
+                "dispatch_unexpected_photo_reply chat_id=%s",
+                update.message.chat.id,
             )
             return
 

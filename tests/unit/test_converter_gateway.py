@@ -488,3 +488,40 @@ class TestConverterLifecycle:
         )
 
         assert converter.closed is True
+
+
+class TestNoSecondRunAfterThePortrait:
+    @pytest.mark.asyncio
+    async def test_a_photo_after_the_portrait_gets_the_holding_reply(
+        self, tmp_path: Any
+    ) -> None:
+        """Sweep lock: no route re-enters an earlier stage (no new run)."""
+        send = new_send()
+        send_photo = new_send_photo()
+        converter = FakeConverter()
+        interviewer = model_finish_script()
+        vision = AsyncMock()
+        vision.check_photo = AsyncMock(return_value=ACCEPT_VERDICT)
+        vision.close = AsyncMock()
+
+        await run_updates(
+            FINISH_UPDATES
+            + [
+                [photo_update(7, 555)],
+                [text_update(8, 555, "and another thing")],
+            ],
+            interviewer=interviewer,
+            converter=converter,
+            send=send,
+            send_photo=send_photo,
+            media_root=str(tmp_path),
+            vision=vision,
+        )
+
+        texts = sent_texts(send)
+        assert texts[-2] == bot_gateway.LATER_PHASE_REPLY  # the later photo
+        assert texts[-1] == bot_gateway.LATER_PHASE_REPLY  # the late text
+        # The Bouncer judged one photo and the Converter ran once: no new run.
+        assert vision.check_photo.await_count == 1
+        assert send_photo.await_count == 1
+        assert len(converter.calls) == 1
