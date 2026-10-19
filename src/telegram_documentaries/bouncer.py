@@ -22,16 +22,27 @@ from pydantic import ValidationError
 
 from telegram_documentaries.gemini import GeminiApiError, GeminiClient
 from telegram_documentaries.logging_utils import log_async_call
-from telegram_documentaries.models import BouncerVerdict, PhotoSize
+from telegram_documentaries.models import (
+    BouncerVerdict,
+    Message,
+    PhotoSize,
+    PortraitSource,
+)
 
 logger = logging.getLogger(__name__)
 
 #: Vision model for the gate (constitution: Gemini 3.1 Flash Lite).
 BOUNCER_MODEL = "gemini-3.1-flash-lite"
 
-#: Hard edge limit for an uploaded photo (validated before *and* after
-#: download — untrusted input, TECH.md).
+#: Hard edge limit for an uploaded portrait (validated before *and* after
+#: download — untrusted input, TECH.md). One cap for photos and documents.
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
+
+#: Telegram's ``photo`` array is always JPEG; a document carries its own type.
+PHOTO_MIME_TYPE = "image/jpeg"
+
+#: Documents are portraits only when Telegram declares an image media type.
+IMAGE_MEDIA_TYPE_PREFIX = "image/"
 
 #: Guardrails prompt: acceptance bar, medium bar, personality rules.
 BOUNCER_PROMPT = """\
@@ -185,6 +196,36 @@ def select_photo_size(photo: list[PhotoSize]) -> PhotoSize:
     if not photo:
         raise PhotoValidationError("photo message contained no photo sizes")
     return max(photo, key=lambda size: size.width * size.height)
+
+
+def portrait_source(message: Message) -> PortraitSource | None:
+    """Return the portrait upload carried by ``message``, if any.
+
+    The single rule for "is this message a portrait?": a normal photo (always
+    JPEG, largest size wins) or a document explicitly declared as an image.
+    Documents without a media type are *not* guessed from their file name -
+    schemas over heuristics (TECH.md) - and non-image documents are nudged
+    exactly like plain text.
+
+    Photo wins if a message somehow carries both (Telegram never sends both).
+    """
+    if message.photo:
+        largest = select_photo_size(message.photo)
+        return PortraitSource(
+            file_id=largest.file_id,
+            mime_type=PHOTO_MIME_TYPE,
+            file_size=largest.file_size,
+        )
+    document = message.document
+    if document is None or document.mime_type is None:
+        return None
+    if not document.mime_type.startswith(IMAGE_MEDIA_TYPE_PREFIX):
+        return None
+    return PortraitSource(
+        file_id=document.file_id,
+        mime_type=document.mime_type,
+        file_size=document.file_size,
+    )
 
 
 @log_async_call(logger)

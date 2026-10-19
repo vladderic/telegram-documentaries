@@ -77,6 +77,35 @@ class PhotoSize(BaseModel):
     file_size: int | None = None
 
 
+class Document(BaseModel):
+    """Telegram document (file) model.
+
+    A portrait sent "as a file" arrives here, uncompressed: that is the whole
+    point of Phase 4b. Only the fields the pipeline needs are modelled.
+    """
+
+    file_id: str
+    file_unique_id: str
+    file_name: str | None = None
+    mime_type: str | None = None
+    file_size: int | None = None
+
+    model_config = {"extra": "ignore"}
+
+
+class PortraitSource(BaseModel):
+    """A message's eligible portrait upload (photo *or* image document).
+
+    Derived, never parsed from Telegram directly: it is the typed answer to
+    "is this message a portrait, and what is it?" so that the router, the
+    guards and the Bouncer intake all share one rule.
+    """
+
+    file_id: str
+    mime_type: str
+    file_size: int | None = None
+
+
 class Message(BaseModel):
     """Telegram message model.
 
@@ -90,6 +119,7 @@ class Message(BaseModel):
     text: str | None = None
     caption: str | None = None
     photo: Annotated[list[PhotoSize] | None, Field(default=None)] = None
+    document: Document | None = None
 
     # Map API alias "from" to from_user; also accept "from_user" if present.
     from_user: User | None = Field(

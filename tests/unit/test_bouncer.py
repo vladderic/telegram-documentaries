@@ -11,7 +11,7 @@ import logging
 import pytest
 
 from telegram_documentaries import bot_gateway, bouncer
-from telegram_documentaries.models import PhotoSize
+from telegram_documentaries.models import Message, PhotoSize
 
 
 def photo_sizes(
@@ -35,6 +35,24 @@ def photo_sizes(
             height=480,
             file_size=file_size,
         ),
+    ]
+
+
+def photo_payload() -> list[dict[str, object]]:
+    """Raw Telegram photo array (as JSON), largest last."""
+    return [
+        {
+            "file_id": "p1-small",
+            "file_unique_id": "u1",
+            "width": 90,
+            "height": 90,
+        },
+        {
+            "file_id": "p2-large",
+            "file_unique_id": "u2",
+            "width": 640,
+            "height": 480,
+        },
     ]
 
 
@@ -122,6 +140,97 @@ class TestFetchPhoto:
         ]
         assert any("fetch_photo" in message for message in warnings)
         assert any("TelegramApiError" in message for message in warnings)
+
+
+class TestPortraitSource:
+    """One predicate decides "is this message a portrait?" (Phase 4b).
+
+    Photos still win when both are present, but the eligible-upload rule lives
+    in a single place so routing can never disagree with the stage.
+    """
+
+    @staticmethod
+    def _message(**fields: object) -> Message:
+        return Message.model_validate(
+            {
+                "message_id": 1,
+                "date": 1_700_000_000,
+                "chat": {"id": 555, "type": "private"},
+                **fields,
+            }
+        )
+
+    def test_photo_message_yields_the_largest_size_as_source(self) -> None:
+        source = bouncer.portrait_source(self._message(photo=photo_payload()))
+
+        assert source is not None
+        assert source.file_id == "p2-large"
+        assert source.mime_type == "image/jpeg"
+
+    def test_image_document_yields_a_source_with_its_own_metadata(self) -> None:
+        source = bouncer.portrait_source(
+            self._message(
+                document={
+                    "file_id": "doc-1",
+                    "file_unique_id": "u-doc-1",
+                    "file_name": "portrait.png",
+                    "mime_type": "image/png",
+                    "file_size": 2_048_000,
+                }
+            )
+        )
+
+        assert source is not None
+        assert source.file_id == "doc-1"
+        assert source.mime_type == "image/png"
+        assert source.file_size == 2_048_000
+
+    def test_photo_wins_when_a_message_carries_both(self) -> None:
+        source = bouncer.portrait_source(
+            self._message(
+                photo=photo_payload(),
+                document={
+                    "file_id": "doc-1",
+                    "file_unique_id": "u-doc-1",
+                    "mime_type": "image/png",
+                },
+            )
+        )
+
+        assert source is not None
+        assert source.file_id == "p2-large"
+
+    def test_non_image_document_is_not_a_portrait(self) -> None:
+        source = bouncer.portrait_source(
+            self._message(
+                document={
+                    "file_id": "doc-2",
+                    "file_unique_id": "u-doc-2",
+                    "file_name": "rules.pdf",
+                    "mime_type": "application/pdf",
+                }
+            )
+        )
+
+        assert source is None
+
+    def test_document_without_a_media_type_is_not_guessed_from_the_name(self) -> None:
+        """Schemas over heuristics: an unflagged file is not a portrait."""
+        source = bouncer.portrait_source(
+            self._message(
+                document={
+                    "file_id": "doc-3",
+                    "file_unique_id": "u-doc-3",
+                    "file_name": "portrait.png",
+                }
+            )
+        )
+
+        assert source is None
+
+    def test_text_and_caption_messages_are_not_portraits(self) -> None:
+        assert bouncer.portrait_source(self._message(text="hello")) is None
+        assert bouncer.portrait_source(self._message(caption="my best")) is None
 
 
 class TestSelectPhotoSize:
