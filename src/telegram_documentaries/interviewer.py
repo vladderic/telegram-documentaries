@@ -79,8 +79,9 @@ PROFILE_RULES = (
     "- 4-7 sentences of rich human personality: habits, quirks and manner.\n"
     "- Ground every claim only in the answers given - invent nothing.\n"
     "- Playful case-file register.\n"
-    "- suggested_animal must be a real animal species whose real traits echo "
-    "that human personality."
+    "- suggested_animal must be the plain species name of a real animal "
+    "(for example 'red fox' or 'herring gull') whose real traits echo that "
+    "human personality - no nicknames, no jokes, no descriptions."
 )
 
 #: Structured-output schemas (the boundary contract, one per call).
@@ -196,7 +197,7 @@ class InterviewerClient:
             GeminiApiError: On transport/HTTP failures, an unexpected response
                 shape, or an empty question.
         """
-        asked = len(interview.answers) + 1
+        asked = len(interview.answers) + (2 if answer is not None else 1)
         prompt = (
             f"{INTERVIEWER_PERSONA}\n\n"
             f"{QUESTION_RULES}\n\n"

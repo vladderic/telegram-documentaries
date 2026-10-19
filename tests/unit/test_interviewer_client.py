@@ -161,6 +161,30 @@ class TestNextQuestion:
             await client.close()
 
     @pytest.mark.asyncio
+    async def test_prompt_numbers_the_question_actually_being_asked(self) -> None:
+        """Resolving answer one, the prompt must call the next question two.
+
+        Live validation showed the model being told "This is question 1" while
+        it was really asking question two (the pending answer was not counted),
+        which risks repeating an earlier question.
+        """
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json=gemini_response({"question": "Q2?"}))
+
+        client = make_client(handler)
+        try:
+            await client.next_question(interview_with(), answer="A1")
+        finally:
+            await client.close()
+
+        lowered = prompt_text(request_body(seen)).lower()
+        assert "question 2" in lowered
+        assert "question 1" not in lowered
+
+    @pytest.mark.asyncio
     async def test_prompt_interviews_the_person_not_an_animal(self) -> None:
         """The subject is a human being: the wildlife lens is tone, not topic.
 
@@ -316,6 +340,9 @@ class TestDistil:
         assert "only" in lowered and "answers" in lowered
         # The dossier describes a human personality; the animal is the metaphor.
         assert "human personality" in lowered
+        # A clean species name, not a punchline ("the common trash-raiding
+        # seagull" was live output the Converter cannot use).
+        assert "species name" in lowered
 
     @pytest.mark.asyncio
     async def test_empty_profile_from_the_model_is_a_typed_failure(self) -> None:
