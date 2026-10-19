@@ -118,3 +118,41 @@ Commits: TG1 `b3c2823` (contract), TG2 `c318123` (`systemInstruction`), TG3
 6. **ROADMAP status row reads "Implementation complete — live validation
    pending"**, not "Complete": every live box above is still unticked and
    Phase 5's own doc box gates `Complete` on a real Telegram run.
+7. **Voice fix after the first live run (user finding).** The first live
+   narration (15:38, `common raccoon`, 81 words) read as generic animal
+   behaviour rather than the subject's quirks. RCA, all three checks run live
+   against the real API:
+   - *Reproduction:* a **quirk-rich** dossier produced a properly personal
+     paragraph (2 a.m. dry cereal, a nest of socks, wrappers under the sofa,
+     nail-biting, four repeated notes); a **thin** dossier of the same length
+     produced generic raccoon biology ("emerges under the cover of darkness",
+     "nightly labor", "solitary rituals").
+   - *Isolation:* hardening the Scripter rules alone improved the thin case
+     (no invented species facts) but could not make it specific — there was no
+     concrete material to use. The root cause was upstream: the interview had
+     never asked about bedtime or food, and the profile rule asked for "rich
+     human personality", which invites abstractions.
+   - *Fix (both stages, user decision):* the Scripter persona/rules now pin the
+     narration to the subject's own documented habits and forbid species natural
+     history (`never state general facts about the species`), prefer the
+     concrete detail over the abstract trait, and the user turn leads with the
+     dossier while demoting the species note to flavour. The interviewer now
+     covers nightly routine / food and snacking / one odd ritual, gates
+     finishing on that coverage, and demands concrete, quotable behaviour in the
+     profile (prose rule **and** schema description).
+   - *Post-fix live check (scripted interview, mundane answers):* the questions
+     harvested the material ("what specific ritual do you perform…",
+     "the secret item you scavenge from your pantry", "a singular, repetitive
+     physical tic"), the profile became concrete ("obsessively reboiling the
+     kettle three times in succession without ever brewing a drink") and the
+     narration anchored on it ("the repetitive ritual of reboiling the kettle
+     three times in succession, never once brewing a drink") with no species
+     biology at all.
+   - Regression tests: `tests/unit/test_scripter_client.py` (`TestVoice`,
+     `test_leads_with_the_dossier_and_demotes_the_species_note`) and
+     `tests/unit/test_interviewer_client.py` (coverage, finish gate, profile
+     concreteness). Suite: 306 passing.
+   - Trade-off recorded with the user: the interview questions are now more
+     systematic and can hint at the material ("the secret item you scavenge from
+     the pantry"). The live Telegram boxes above still need a fresh run on this
+     build.

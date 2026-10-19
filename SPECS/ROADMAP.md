@@ -24,6 +24,14 @@ keyed by `chat_id`, final dossier summary + suggested animal.
 - **Acceptance:** full interview completes with correct phase transitions;
   dossier persists across the Q&A; wrong-type messages mid-interview handled
   gracefully.
+- **Amendment (Phase 5, user request):** the interview deliberately covers the
+  material the narration is built from — the nightly routine, what and when the
+  subject eats or snacks, and one repeated odd habit — and finishing is gated on
+  that coverage. The profile is written as concrete, quotable behaviour rather
+  than abstractions, because the dossier is the Scripter's only fuel: a live
+  Phase 5 run on a thin dossier produced a paragraph of generic species biology
+  instead of the subject's own quirks. See
+  `SPECS/2026-10-19-interviewer/requirements.md` (live observations).
 - **Serves:** happy path.
 
 ## Phase 4 — Converter
@@ -68,6 +76,13 @@ the dossier.
   Phase 6. The two stages are independent: a jammed darkroom still narrates, a
   lost script still leaves the portrait standing. Over-length output is sent as
   written with a `scripter_over_word_limit` warning.
+- **Voice fix (live finding):** the narrator is pinned to the subject's own
+  documented habits — never the species' natural history — with concrete dossier
+  detail preferred over abstract traits, and the dossier leads the user turn
+  while the species note is labelled as flavour only. The interview was
+  strengthened alongside it (see Phase 3's amendment); a controlled live check
+  showed the same dossiers now produce quirk-anchored narration instead of
+  raccoon biology.
 - **Serves:** happy path.
 
 ## Phase 6 — Narrator

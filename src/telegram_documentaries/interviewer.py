@@ -55,8 +55,23 @@ INTERVIEWER_PERSONA = (
     "You are the Interviewer for a comedy wildlife documentary, and your "
     "subject is a HUMAN BEING talking about their ordinary human life. You "
     "study people the way a field crew studies a new species: investigative, "
-    "playful and slightly eccentric. The animal comparison is drawn later, "
-    "from the transcript - it is your private shorthand, never your topic."
+    "playful and slightly eccentric. The animal is the metaphor."
+)
+
+#: The dossier is the narration's only fuel: an interview that never asks for
+#: the concrete material produces a bland profile, and the Scripter can then
+#: only describe the species in general (live finding - a thin dossier produced
+#: a paragraph of generic raccoon biology).
+COVERAGE_RULES = (
+    "Cover all three of these before you finish, once each at least, woven in "
+    "however feels natural:\n"
+    "1. their nightly routine - how the evening ends and how they get to sleep;\n"
+    "2. food - what and when they eat, especially snacks, treats or secret "
+    "mid-meal raids;\n"
+    "3. one small odd habit or ritual they repeat.\n"
+    "Ask for the concrete thing, never the abstraction: 'what is in the bowl at "
+    "two in the morning?' gets the funny answer, 'do you eat healthily?' does "
+    "not."
 )
 
 QUESTION_RULES = (
@@ -67,6 +82,7 @@ QUESTION_RULES = (
     "- Never repeat a question you have already asked.\n"
     "- Ask about their human life: routines, habits, quirks, people, "
     "feelings, how they spend a day.\n"
+    f"- {COVERAGE_RULES}\n"
     "- Never ask about them as if they were an animal: no animal life, packs, "
     "prey, watering holes, migration or mating. The creature comparison is "
     "decided later, and the subject must never be asked to become it.\n"
@@ -76,7 +92,12 @@ QUESTION_RULES = (
 PROFILE_RULES = (
     "Rules for the profile:\n"
     "- Write in the third person about 'the subject', a human being.\n"
-    "- 4-7 sentences of rich human personality: habits, quirks and manner.\n"
+    "- 4-7 sentences of rich human personality, but concrete and quotable "
+    "rather than abstract: the nightly routine, what and when they eat or "
+    "snack, the odd habits they repeat. Name the specifics ('dry cereal, eaten "
+    "standing up, in the dark') instead of abstractions ('enjoys snacking'). "
+    "If an answer is thin, use the concrete detail it does give - never pad it "
+    "with generalities.\n"
     "- Ground every claim only in the answers given - invent nothing.\n"
     "- Playful case-file register.\n"
     "- suggested_animal must be the bare species name of a real animal whose "
@@ -114,13 +135,27 @@ _ANIMAL_DESCRIPTION_SCHEMA: dict[str, str] = {
         "narration about that species' behaviour."
     ),
 }
+#: The profile is the Scripter's only fuel and (per the split above) a schema
+#: description is the strongest lever: it demands the concrete, quotable
+#: behaviour that makes the narration funny instead of generic.
+_PROFILE_SCHEMA: dict[str, str] = {
+    "type": "string",
+    "description": (
+        "4-7 sentences of concrete, quotable human behaviour, grounded only in "
+        "the answers - invent nothing: the nightly routine and how the "
+        "subject gets to sleep, what and when they eat or snack, and the odd "
+        "habits they repeat. Name the specifics ('dry cereal, eaten standing "
+        "up, in the dark') instead of abstractions ('enjoys snacking'). "
+        "Playful case-file register."
+    ),
+}
 
 STEP_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "action": {"type": "string", "enum": ["ASK", "FINISH"]},
         "question": {"type": "string"},
-        "profile": {"type": "string"},
+        "profile": _PROFILE_SCHEMA,
         "suggested_animal": _ANIMAL_SCHEMA,
         "animal_description": _ANIMAL_DESCRIPTION_SCHEMA,
     },
@@ -130,7 +165,7 @@ STEP_SCHEMA: dict[str, Any] = {
 PROFILE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "profile": {"type": "string"},
+        "profile": _PROFILE_SCHEMA,
         "suggested_animal": _ANIMAL_SCHEMA,
         "animal_description": _ANIMAL_DESCRIPTION_SCHEMA,
     },
@@ -267,7 +302,9 @@ class InterviewerClient:
             f"- FINISH with the profile, the suggested animal and its "
             f"one-line description.\n"
             f"Ask only while you have fewer than {MAX_QUESTIONS} answers, and "
-            f"finish no earlier than {MIN_QUESTIONS}.\n\n"
+            f"finish no earlier than {MIN_QUESTIONS} - and only once the three "
+            f"areas above are covered. A finish with a thin dossier writes a "
+            f"bland narration.\n\n"
             f"{build_transcript(interview, answer)}"
         )
         data = await self._gemini.generate(_contents(prompt), STEP_SCHEMA)

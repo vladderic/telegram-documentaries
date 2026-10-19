@@ -38,9 +38,11 @@ MAX_WORDS = 90
 SCRIPTER_PERSONA = (
     "You are the narrator of a revered, dramatic British wildlife "
     "documentary - the voice that has introduced a thousand creatures. Your "
-    "subject is a HUMAN BEING, cast as the animal named in the briefing: you "
-    "study their ordinary human life as though it were the behaviour of that "
-    "creature, with the fond, grand authority of the genre."
+    "subject is one specific HUMAN BEING, and the animal you call them by is "
+    "only the name the crew gave them: you are never narrating that species in "
+    "general. You narrate this individual's own documented human habits as "
+    "though they were that creature's behaviour, with the fond, grand authority "
+    "of the genre."
 )
 
 SCRIPT_RULES = (
@@ -50,11 +52,19 @@ SCRIPT_RULES = (
     "- Plain prose for the microphone: no markdown, no lists, no headings, no "
     "line breaks, no quotation marks, no speaker labels, no stage directions, "
     "no sound effects. It is read aloud exactly as written.\n"
-    "- Name the species the subject was cast as, and keep the subject in that "
-    "role: their quirks, habits and appetites are the animal behaviour under "
-    "study, played for quiet comedy.\n"
-    "- Ground every claim in the dossier; invent nothing.\n"
-    "- Never address the reader, never explain the joke, never list facts."
+    "- Every behaviour you describe must be one of the specific habits written "
+    "in the dossier: the nightly routine, what and when they eat or snack, the "
+    "odd rituals they repeat. Invent nothing, and describe no behaviour the "
+    "dossier does not state.\n"
+    "- Never state general facts about the species - its habitat, its diet, its "
+    "typical behaviour. The species is only how you refer to the subject.\n"
+    "- Prefer the concrete detail to the abstract trait: 'dry cereal at two in "
+    "the morning, standing up, in the dark' beats 'nocturnal foraging'. If the "
+    "dossier is thin, narrate the few real habits it does give you - never fall "
+    "back on the animal in general.\n"
+    "- Name the species once, as the subject's identity, and keep the register "
+    "dry and affectionate - never address the reader, never explain the joke, "
+    "never list facts."
 )
 
 #: Structured-output schema (the boundary contract): one field, named like the
@@ -65,9 +75,10 @@ SCRIPT_SCHEMA: dict[str, Any] = {
         "text": {
             "type": "string",
             "description": (
-                "The narration: exactly one paragraph of 60 to 90 words, plain "
-                "prose with no markdown, no line breaks and no quotation "
-                "marks - it will be read aloud exactly as written."
+                "The narration: exactly one paragraph of 60 to 90 words about "
+                "this subject's own documented habits, plain prose with no "
+                "markdown, no line breaks and no quotation marks - it will be "
+                "read aloud exactly as written."
             ),
         }
     },
@@ -79,12 +90,17 @@ def build_prompt(profile: BehaviouralProfile) -> str:
     """Build the user turn from the typed dossier (pure, testable).
 
     Only the facts: the narrator's role and rules are the system instruction.
+    The dossier comes first and the species last, labelled as identity rather
+    than subject matter: leading with the species invited a paragraph of
+    generic natural history instead of the subject's own habits (live finding).
     """
     return (
-        f"The subject was cast as: {profile.suggested_animal}\n"
-        f"The crew's note on that species: {profile.animal_description}\n\n"
-        f"Dossier on the subject:\n{profile.profile}\n\n"
-        f"Write the narration now."
+        f"The subject is a human being. Their dossier - your only source of "
+        f"behaviour:\n{profile.profile}\n\n"
+        f"The crew has cast them as: {profile.suggested_animal}\n"
+        f"The crew's note on that species (flavour, not subject matter): "
+        f"{profile.animal_description}\n\n"
+        f"Write the narration now, about this subject's own habits."
     )
 
 

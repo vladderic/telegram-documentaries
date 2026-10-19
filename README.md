@@ -73,9 +73,12 @@ It long-polls Telegram (`getUpdates`) and runs the three stages built so far:
 2. **Interviewer** — an accepted photo gets a short confirmation and the first
    of 5–7 interview questions, one per message, adapted to the answers given
    so far. A message queued *before* the pending question went out is nudged
-   rather than recorded. When the interview ends (the model decides, inside the
-   5–7 window), the bot reveals the case file: profile, the suggested animal as
-   a bare species name, and a one-line description of it.
+   rather than recorded. The questions deliberately cover the material the
+   narration is built from — the nightly routine, what and when you eat or
+   snack, and a repeated odd habit — and the interview only ends once it has.
+   When the interview ends (the model decides, inside the 5–7 window), the bot
+   reveals the case file: profile, the suggested animal as a bare species name,
+   and a one-line description of it.
 3. **Converter** — the stored portrait and the dossier go to Gemini image
    generation (after a "darkroom" hold line, since generation takes seconds)
    and the hybrid portrait comes back as a captioned photo. The stored bytes
@@ -86,10 +89,12 @@ It long-polls Telegram (`getUpdates`) and runs the three stages built so far:
 4. **Scripter** — the dossier goes to Gemini text with the narrator persona and
    rules as the model's system instruction, and one paragraph (~60–90 words) of
    narration comes back as a plain text message, sent right after the portrait.
-   A 91-word+ script is still sent (words are never rewritten), with a warning
-   in the log. The portrait and the narration are independent: if the darkroom
-   jams the narrator still speaks, and if the narrator loses his page the
-   portrait still stands. The text is kept on the session for Phase 6 (TTS).
+   The narration is about *your own* habits — the dossier is its only source —
+   never a lecture about the animal you were cast as. A 91-word+ script is still
+   sent (words are never rewritten), with a warning in the log. The portrait and
+   the narration are independent: if the darkroom jams the narrator still
+   speaks, and if the narrator loses his page the portrait still stands. The text
+   is kept on the session for Phase 6 (TTS).
 
 Shut down gracefully with **Ctrl+C** or **SIGTERM** — even while a long poll is
 in flight. Sessions live in memory only, so a restart means a fresh photo.

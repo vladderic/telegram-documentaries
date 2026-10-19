@@ -212,6 +212,37 @@ class TestNextQuestion:
         assert "prey" in lowered
         assert "investigative" in lowered
 
+    @pytest.mark.asyncio
+    async def test_prompt_demands_the_material_that_makes_a_narration_funny(
+        self,
+    ) -> None:
+        """The dossier is the narration's only fuel (live finding).
+
+        A thin dossier produced a paragraph of generic species biology instead of
+        the subject's quirks, so the interview must deliberately harvest the
+        concrete material: the nightly routine, what and when they eat, and a
+        repeated odd ritual.
+        """
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json=gemini_response({"question": "Q1?"}))
+
+        client = make_client(handler)
+        try:
+            await client.next_question(interview_with(), answer=None)
+        finally:
+            await client.close()
+
+        lowered = prompt_text(request_body(seen)).lower()
+        assert "nightly routine" in lowered
+        assert "sleep" in lowered
+        assert "eat" in lowered and "snack" in lowered
+        assert "odd habit" in lowered
+        # Concrete beats abstract: the funny answer is a named thing.
+        assert "concrete" in lowered
+
 
 class TestNextStep:
     @pytest.mark.asyncio
@@ -291,6 +322,29 @@ class TestNextStep:
         assert "one question" in lowered
 
     @pytest.mark.asyncio
+    async def test_finish_is_gated_on_the_coverage_not_only_the_count(self) -> None:
+        """Finishing early with a thin dossier is what makes the narration bland."""
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(
+                200, json=gemini_response({"action": "ASK", "question": "Q?"})
+            )
+
+        client = make_client(handler)
+        try:
+            await client.next_step(interview_with(("Q1?", "A1")), answer="A1")
+        finally:
+            await client.close()
+
+        lowered = prompt_text(request_body(seen)).lower()
+        assert "nightly routine" in lowered
+        assert "snack" in lowered
+        assert "odd habit" in lowered
+        assert "covered" in lowered
+
+    @pytest.mark.asyncio
     async def test_inconsistent_step_payload_is_a_typed_failure(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
@@ -351,12 +405,22 @@ class TestDistil:
         assert "only" in lowered and "answers" in lowered
         # The dossier describes a human personality; the animal is the metaphor.
         assert "human personality" in lowered
+        # A thin, abstract dossier is what makes the narration generic (live
+        # finding), so the profile must demand concrete, quotable behaviour.
+        assert "concrete" in lowered
+        assert "nightly routine" in lowered
+        assert "snack" in lowered
+        assert "invent nothing" in lowered
+        properties = body["generationConfig"]["responseSchema"]["properties"]
+        profile_description = properties["profile"]["description"].lower()
+        assert "concrete" in profile_description
+        assert "nightly routine" in profile_description
+        assert "invent nothing" in profile_description
         # A clean species name, not a punchline ("the common trash-raiding
         # seagull" was live output the Converter cannot use).
         assert "species name" in lowered
         assert "no leading article" in lowered
         # The schema description is the strongest lever the model obeys.
-        properties = body["generationConfig"]["responseSchema"]["properties"]
         assert "no article" in properties["suggested_animal"]["description"].lower()
         assert "no clause" in properties["suggested_animal"]["description"].lower()
         assert (

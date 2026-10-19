@@ -103,6 +103,19 @@ class TestBuildPrompt:
 
         assert "red fox" in prompt
 
+    def test_leads_with_the_dossier_and_demotes_the_species_note(self) -> None:
+        """The dossier is the subject matter; the species is only the name.
+
+        Live finding: leading with the species and its crew note invited a
+        paragraph of generic red-fox natural history instead of the subject's
+        own habits, so the dossier now comes first and the species note is
+        labelled as flavour.
+        """
+        prompt = build_prompt(PROFILE)
+
+        assert prompt.index(PROFILE.profile) < prompt.index(PROFILE.suggested_animal)
+        assert "only source of behaviour" in prompt.lower()
+
 
 class TestVoice:
     """The narrator the user asked for: documentarian, not a fact sheet."""
@@ -121,6 +134,13 @@ class TestVoice:
         assert "human" in persona
         assert "animal" in persona
 
+    def test_persona_never_narrates_the_species_in_general(self) -> None:
+        persona = SCRIPTER_PERSONA.lower()
+
+        assert (
+            "species in general" in persona or "never narrating that species" in persona
+        )
+
     def test_rules_bound_the_output_for_the_microphone(self) -> None:
         rules = SCRIPT_RULES.lower()
 
@@ -134,6 +154,21 @@ class TestVoice:
 
         assert "species" in rules
         assert "nothing" in rules and "invent" in rules
+
+    def test_rules_forbid_species_natural_history(self) -> None:
+        """Otherwise the narrator lectures about the animal, not the subject."""
+        rules = SCRIPT_RULES.lower()
+
+        assert "never state general facts about the species" in rules
+        assert "typical behaviour" in rules
+
+    def test_rules_demand_the_concrete_dossier_detail(self) -> None:
+        """Abstract traits are the failure mode: 'nocturnal foraging' is not funny."""
+        rules = SCRIPT_RULES.lower()
+
+        assert "concrete detail" in rules
+        assert "abstract" in rules
+        assert "if the dossier is thin" in rules
 
 
 class TestWriteScript:
