@@ -5,9 +5,10 @@ in the report. Automated boxes are ticked by `./scripts/test` /
 `./scripts/hooks`; live boxes need a real Telegram run.
 
 Evidence base: `./scripts/hooks` green (ruff, ruff-format, mypy, pytest,
-gitleaks) with **300 unit tests passing** (253 before Phase 5, +47 new).
+gitleaks) with **306 unit tests passing** (253 before Phase 5, +53 new).
 Commits: TG1 `b3c2823` (contract), TG2 `c318123` (`systemInstruction`), TG3
-`6994a5c` (`scripter.py`), TG4 `41a7849` (gateway wiring).
+`6994a5c` (`scripter.py`), TG4 `41a7849` (gateway wiring), TG5 `fea5bf3` /
+`3506925` (docs + banner), voice fix `8956b97` (see difference 7).
 
 ## Automated
 
@@ -58,13 +59,28 @@ Commits: TG1 `b3c2823` (contract), TG2 `c318123` (`systemInstruction`), TG3
 
 ## Live (real Telegram traffic)
 
-- [ ] Live happy path: send a photo → finish the 5–7 questions → portrait
-      arrives, then the narration arrives as a plain text message.
-- [ ] The narration names the same species as the portrait caption.
-- [ ] Reading it aloud works: one paragraph, no markdown characters, no line
+- [x] Live happy path: send a photo → finish the 5–7 questions → portrait
+      and then the narration arrives as a plain text message.
+      → Real run on the fixed build, `2026-10-19 16:15–16:18`: photo accepted
+      (`bouncer_verdict accepted=True`), five questions answered, then
+      `interview_step action=FINISH in_hand=5 animal='giant panda'` →
+      `portrait_delivered animal='giant panda' bytes=753387` →
+      `script_delivered words=82 chars=529`. User's verdict on the narration:
+      "more quirky and based on what the user is saying — I like it".
+- [x] The narration names the same species as the portrait caption.
+      → User confirmation on the same run (16:18): the narration named the
+      **giant panda**, matching the portrait caption.
+- [x] Reading it aloud works: one paragraph, no markdown characters, no line
       breaks, ≤90 words (record the `scripter_script words=… chars=…` line and
       the word count of the received text).
-- [ ] `script_delivered` in the log with `words`/`chars`.
+      → `scripter_script words=82 chars=529` (82 ≤ 90); user confirmation on
+      the received message: "one clean paragraph", no markdown, no line breaks.
+- [x] `script_delivered` in the log with `words`/`chars`.
+      → `2026-10-19 16:18:47,459 INFO telegram_documentaries.bot_gateway:
+      script_delivered chat_id=8602114797 words=82 chars=529`, preceded by
+      `scripter_write animal='giant panda'` and `scripter_script words=82
+      chars=529` (Gemini call 200 in 1.5s, no fallback).
+
 - [x] The gateway banner reads `(Phase 5 - Scripter)`.
       → Bot restarted on this branch: `2026-10-19 15:09:15,505 INFO
       telegram_documentaries.bot_gateway: Starting Telegram gateway
@@ -75,8 +91,13 @@ Commits: TG1 `b3c2823` (contract), TG2 `c318123` (`systemInstruction`), TG3
       paragraph, no newlines, species named ("The Eurasian magpie remains a
       creature of insatiable desire…"), voice on-model. No fallback needed;
       the persona+rules stay in the system instruction.
-- [ ] One narration per session live: after the narration, any message gets
+- [x] One narration per session live: after the narration, any message gets
       `LATER_PHASE_REPLY` and no second `scripter_script` line.
+      → 16:23 the user sent two messages after the narration; the bot answered
+      `LATER_PHASE_REPLY` ("One moment - the crew is still setting up this
+      scene. Give me a beat to catch up.", `sendMessage` 200 at 16:23:27 and
+      16:23:57) and the log shows **no** `scripter_script` line after
+      `16:18:47`.
 
 ## Docs
 
@@ -115,9 +136,10 @@ Commits: TG1 `b3c2823` (contract), TG2 `c318123` (`systemInstruction`), TG3
    `test_converter_failure_still_narrates_and_holds_afterwards`): the finish
    path now ends after the narration, so `texts[-1]` is the narration, not the
    hold line.
-6. **ROADMAP status row reads "Implementation complete — live validation
-   pending"**, not "Complete": every live box above is still unticked and
-   Phase 5's own doc box gates `Complete` on a real Telegram run.
+6. **ROADMAP status row was held at "Implementation complete — live validation
+   pending"** until the live boxes above were ticked, then set to **Complete**
+   once the 16:15–16:18 Telegram run passed on the fixed build (see the live
+   section and difference 7).
 7. **Voice fix after the first live run (user finding).** The first live
    narration (15:38, `common raccoon`, 81 words) read as generic animal
    behaviour rather than the subject's quirks. RCA, all three checks run live
@@ -156,3 +178,14 @@ Commits: TG1 `b3c2823` (contract), TG2 `c318123` (`systemInstruction`), TG3
      systematic and can hint at the material ("the secret item you scavenge from
      the pantry"). The live Telegram boxes above still need a fresh run on this
      build.
+8. **Observation (not a bug, user's call).** In the 16:18 run the reveal's
+   `animal_description` came back as a quirk line rather than a species line —
+   *"The domestic couch-dweller expertly cycles through artificial stimulants
+   and digital pacifiers to maintain its fragile, flickering composure."* — i.e.
+   it no longer names the species, where the earlier live samples did ("A common
+   pigeon, constantly pecking at bright objects…"). That is a side effect of the
+   interviewer prompt now leaning on the subject's habits (the profile rules
+   bleed into the description prompt). It reads well and the species name is
+   still shown separately on the reveal, so it was left as is; tightening the
+   `animal_description` prompt back to the species is a one-line change if
+   wanted.

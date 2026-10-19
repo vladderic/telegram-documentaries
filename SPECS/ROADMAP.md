@@ -83,6 +83,10 @@ the dossier.
   strengthened alongside it (see Phase 3's amendment); a controlled live check
   showed the same dossiers now produce quirk-anchored narration instead of
   raccoon biology.
+- **Live verified (`2026-10-19`):** a full Telegram run (giant panda, 5 answers)
+  delivered the portrait and then an 82-word narration naming the same species,
+  with one-narration-per-session holding (`LATER_PHASE_REPLY` on later
+  messages). Boxes and evidence: `SPECS/2026-10-19-scripter/validation.md`.
 - **Serves:** happy path.
 
 ## Phase 6 — Narrator
@@ -126,7 +130,7 @@ OOM kill, box restart) never leaves it silently offline.
 | 2 — Bouncer | Complete |
 | 3 — Interviewer | Complete |
 | 4 — Converter | Complete |
-| 5 — Scripter | Implementation complete — live validation pending |
+| 5 — Scripter | Complete |
 | 6 — Narrator | Not started |
 | 7 — Resilience | Not started |
 | 8 — Deployment (zero-cost) | Not started |
