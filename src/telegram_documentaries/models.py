@@ -213,6 +213,22 @@ class InterviewStep(BaseModel):
                 raise ValueError("a FINISH step must not carry a question")
         return self
 
+    def to_profile(self) -> BehaviouralProfile | None:
+        """The profile of a FINISH step, or ``None`` when this step is not one.
+
+        Typed accessor so callers never have to narrow ``profile`` /
+        ``suggested_animal`` themselves; the consistency validator above
+        guarantees the fields are present when the action is FINISH.
+        """
+        if self.action is not InterviewAction.FINISH:
+            return None
+        if self.profile is None or self.suggested_animal is None:
+            return None  # unreachable past the validator - never trust blindly
+        return BehaviouralProfile(
+            profile=self.profile,
+            suggested_animal=self.suggested_animal,
+        )
+
 
 class BehaviouralProfile(BaseModel):
     """The Interviewer's output: the dossier that fuels later stages."""

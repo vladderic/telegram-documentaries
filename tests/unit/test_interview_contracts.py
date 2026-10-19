@@ -112,6 +112,27 @@ class TestInterviewStep:
         with pytest.raises(ValidationError):
             InterviewStep.model_validate({"foo": "bar"})
 
+    def test_to_profile_returns_the_typed_profile_for_a_finish_step(self) -> None:
+        step = InterviewStep.model_validate(
+            {
+                "action": "FINISH",
+                "profile": "The subject hoards stationery.",
+                "suggested_animal": "Eurasian magpie",
+            }
+        )
+
+        profile = step.to_profile()
+
+        assert profile == BehaviouralProfile(
+            profile="The subject hoards stationery.",
+            suggested_animal="Eurasian magpie",
+        )
+
+    def test_to_profile_is_none_for_an_ask_step(self) -> None:
+        step = InterviewStep.model_validate({"action": "ASK", "question": "Q?"})
+
+        assert step.to_profile() is None
+
 
 class TestBehaviouralProfile:
     def test_parses_the_stage_output(self) -> None:

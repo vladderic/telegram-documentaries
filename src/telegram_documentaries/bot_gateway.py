@@ -1,9 +1,9 @@
-"""Phase 1-2 Telegram gateway (entry point).
+"""Phase 1-3 Telegram gateway (entry point).
 
 Responsibilities:
 - load secrets from ``.env`` (never hardcode, never log them),
 - long-poll Telegram (``getUpdates``) and route each update to the current
-  pipeline stage (Phase 2: the Bouncer vision gate),
+  pipeline stage (Phase 2: the Bouncer vision gate; Phase 3: the Interviewer),
 - fail loudly with a clear log when configuration is missing,
 - shut down gracefully on Ctrl+C / SIGTERM, even mid-poll.
 
@@ -34,8 +34,16 @@ from telegram_documentaries.config import (
     load_settings,
 )
 from telegram_documentaries.gemini import GeminiApiError
+from telegram_documentaries.interviewer import (
+    MAX_QUESTIONS,
+    MIN_QUESTIONS,
+    InterviewerClient,
+)
 from telegram_documentaries.logging_utils import log_phase_transition
 from telegram_documentaries.models import (
+    InterviewAction,
+    InterviewAnswer,
+    InterviewStep,
     Message,
     Phase,
     SessionState,
@@ -50,13 +58,17 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 #: Where accepted portraits are stored (gitignored; keyed per chat_id).
 DEFAULT_MEDIA_ROOT = ".tmp/media"
 
+#: Phases owned by the Interviewer (Phase 3): text is an answer, anything else
+#: (or nothing at all) only nudges.
+INTERVIEW_PHASES = frozenset({Phase.AWAITING_INTERVIEW, Phase.INTERVIEW})
+
 #: Fixed in-character replies for the awaiting-photo phase (rejections are
 #: model-written by the Bouncer; these cover input that was never judged).
 PHOTO_NUDGE = (
     "A pleasure to hear from you - but I judge faces, not words. "
     "Send me a photograph and we will get you on camera."
 )
-#: Input that arrives before the stage behind us exists (interview onwards).
+#: Input that arrives before the stage behind us exists (Converter onwards).
 LATER_PHASE_REPLY = (
     "One moment - the crew is still setting up this scene. Give me a beat to catch up."
 )
@@ -68,6 +80,23 @@ BOUNCER_RETRY_MSG = (
 #: Edge validation refused the upload (too large).
 PHOTO_TOO_LARGE_MSG = (
     "That frame is a touch too large for my lens. Send a smaller photograph, please."
+)
+#: Non-text (or empty) input mid-interview: nudge and repeat the question.
+INTERVIEW_NUDGE = (
+    "The recorder only takes dictation - words, not stickers or silence. "
+    "I will ask again:"
+)
+#: The Interviewer's model call failed (API down/timeout): nothing was
+#: recorded, so the same answer can simply be resent.
+INTERVIEW_RETRY_MSG = (
+    "Hold that thought - my notebook just snapped shut. Say that again, "
+    "and I will catch it all down."
+)
+#: Case-file reveal: the profile text plus the suggested animal.
+PROFILE_REVEAL_TEMPLATE = (
+    "The dossier is closed - and the crew has seen enough of you.\n\n"
+    "{profile}\n\n"
+    "Suggested casting: {animal}"
 )
 #: Catch-all after an unexpected failure on the conversation path.
 DISPATCH_FAILURE_MSG = (
@@ -226,6 +255,9 @@ class TelegramClient:
 def build_reply(message: Message, session: SessionState) -> str | None:
     """Build the reply for non-photo input at the session's current phase.
 
+    The interview stage (``INTERVIEW_PHASES``) never reaches this function -
+    the dispatcher hands those messages to the Interviewer first.
+
     Args:
         message: Validated Telegram message (never a raw dict).
         session: The sender's session state (phase decides the reply).
@@ -264,9 +296,198 @@ def _store_photo(media_root: str | Path, chat_id: int, image_bytes: bytes) -> st
     return str(path)
 
 
+async def _send(client: TelegramClient, chat_id: int, text: str) -> bool:
+    """Send one in-character message, logging (never raising) on failure.
+
+    A send failure must not lose the interview: callers only record the
+    question they sent once this returns ``True`` (TECH.md error policy).
+    """
+    try:
+        await client.send_message(chat_id=chat_id, text=text)
+    except Exception:
+        logger.exception("failed to send message chat_id=%s", chat_id)
+        return False
+    return True
+
+
+async def _ask_question(
+    client: TelegramClient,
+    interviewer: InterviewerClient,
+    session: SessionState,
+    answer: str | None,
+) -> bool:
+    """Ask (or re-ask) the next question; never raises.
+
+    Args:
+        client: Telegram client for the outbound message.
+        interviewer: Interviewer client (the model call).
+        session: Session being interviewed; advanced to ``INTERVIEW``.
+        answer: The tentative answer that triggered this call, or ``None``
+            (first question / re-ask after a failure).
+
+    Returns:
+        True when the question reached the user (and is now pending), False
+        when the model or the send failed (an in-character retry was sent
+        instead and no question is pending, so the user's next message can
+        safely re-ask without recording anything).
+    """
+    chat_id = session.chat_id
+    try:
+        question = await interviewer.next_question(session.interview, answer)
+    except (GeminiApiError, TelegramApiError):
+        logger.exception("interviewer failed to ask chat_id=%s", chat_id)
+        await _send(client, chat_id, INTERVIEW_RETRY_MSG)
+        return False
+
+    if session.phase is not Phase.INTERVIEW:
+        log_phase_transition(logger, chat_id, session.phase, Phase.INTERVIEW)
+        session.phase = Phase.INTERVIEW
+    logger.info(
+        "interview_question chat_id=%s number=%s",
+        chat_id,
+        session.interview.next_question_number,
+    )
+    if not await _send(client, chat_id, question):
+        return False
+    # Only now is it the question the user is answering.
+    session.interview.pending_question = question
+    return True
+
+
+async def _handle_answer(
+    client: TelegramClient,
+    interviewer: InterviewerClient,
+    session: SessionState,
+    answer: str,
+) -> None:
+    """Resolve one answer and advance the interview; never raises.
+
+    The thresholds are enforced here, not by the model: below
+    :data:`~telegram_documentaries.interviewer.MIN_QUESTIONS` the next question
+    is forced, inside the window the model chooses (ask or finish), and at
+    :data:`~telegram_documentaries.interviewer.MAX_QUESTIONS` the profile is
+    forced. The answer is recorded only once the model response is parsed, so
+    a failed call can be retried without duplicating it.
+    """
+    chat_id = session.chat_id
+    interview = session.interview
+    pending = interview.pending_question or ""
+    in_hand = len(interview.answers) + 1
+    logger.info(
+        "interview_answer chat_id=%s number=%s chars=%s",
+        chat_id,
+        in_hand,
+        len(answer),
+    )
+
+    try:
+        if in_hand < MIN_QUESTIONS:
+            step = InterviewStep(
+                action=InterviewAction.ASK,
+                question=await interviewer.next_question(interview, answer),
+            )
+        elif in_hand < MAX_QUESTIONS:
+            step = await interviewer.next_step(interview, answer)
+        else:
+            profile = await interviewer.distil(interview, answer)
+            step = InterviewStep(
+                action=InterviewAction.FINISH,
+                profile=profile.profile,
+                suggested_animal=profile.suggested_animal,
+            )
+    except (GeminiApiError, TelegramApiError):
+        # Nothing recorded: the pending question stays pending, so resending
+        # the same answer cannot duplicate it.
+        logger.exception("interviewer failed chat_id=%s", chat_id)
+        await _send(client, chat_id, INTERVIEW_RETRY_MSG)
+        return
+
+    # The step resolved: record the tentative answer exactly once.
+    interview.answers.append(InterviewAnswer(question=pending, answer=answer))
+    interview.pending_question = None
+
+    if step.action is InterviewAction.FINISH:
+        final_profile = step.to_profile()
+        if final_profile is None:  # contract guard; the validator forbids this
+            logger.error("interview_finish_without_profile chat_id=%s", chat_id)
+            await _send(client, chat_id, INTERVIEW_RETRY_MSG)
+            return
+        interview.profile = final_profile
+        log_phase_transition(logger, chat_id, session.phase, Phase.CONVERT)
+        session.phase = Phase.CONVERT
+        logger.info(
+            "interview_finished chat_id=%s answers=%s animal=%r",
+            chat_id,
+            len(interview.answers),
+            final_profile.suggested_animal,
+        )
+        await _send(
+            client,
+            chat_id,
+            PROFILE_REVEAL_TEMPLATE.format(
+                profile=final_profile.profile,
+                animal=final_profile.suggested_animal,
+            ),
+        )
+        return
+
+    question = step.question
+    if not question:  # contract guard; the validator forbids this
+        logger.error("interview_ask_without_question chat_id=%s", chat_id)
+        await _send(client, chat_id, INTERVIEW_RETRY_MSG)
+        return
+    if await _send(client, chat_id, question):
+        interview.pending_question = question
+
+
+async def _handle_interview(
+    client: TelegramClient,
+    interviewer: InterviewerClient,
+    session: SessionState,
+    text: str | None,
+) -> None:
+    """Route one message that arrived during the interview; never raises.
+
+    Text is an answer; non-text (``None``) or whitespace-only text only nudges
+    and repeats the pending question, without touching the state. If no
+    question is pending - only possible after a failed ask - the next question
+    is (re)asked and the user's text is never recorded as an answer.
+
+    Args:
+        client: Telegram client for outbound messages.
+        interviewer: Interviewer client (the model call).
+        session: Session in ``INTERVIEW_PHASES``.
+        text: The message's text, or ``None`` for photo/sticker/voice/etc.
+    """
+    chat_id = session.chat_id
+    answer = (text or "").strip()
+
+    if not answer:
+        pending = session.interview.pending_question
+        if pending is None:
+            logger.info("interview_nontext_without_question chat_id=%s", chat_id)
+            await _ask_question(client, interviewer, session, answer=None)
+            return
+        logger.info(
+            "interview_nudge chat_id=%s number=%s",
+            chat_id,
+            session.interview.next_question_number,
+        )
+        await _send(client, chat_id, f"{INTERVIEW_NUDGE}\n\n{pending}")
+        return
+
+    if session.interview.pending_question is None:
+        logger.info("interview_reask chat_id=%s", chat_id)
+        await _ask_question(client, interviewer, session, answer=None)
+        return
+
+    await _handle_answer(client, interviewer, session, answer)
+
+
 async def _handle_photo(
     client: TelegramClient,
     vision: GeminiVisionClient,
+    interviewer: InterviewerClient,
     session: SessionState,
     message: Message,
     media_root: str | Path,
@@ -274,8 +495,9 @@ async def _handle_photo(
     """Run the Bouncer flow for one photo message; never raises.
 
     Accept: store media, advance to ``AWAITING_INTERVIEW``, send the
-    model-written confirmation. Reject: send the content-specific quip and
-    clear partial state so the user can immediately retry (no ``/start``).
+    model-written confirmation and immediately ask the first interview
+    question (phase → ``INTERVIEW``). Reject: send the content-specific quip
+    and clear partial state so the user can immediately retry (no ``/start``).
     Failures: clear state first, then degrade with an in-character reply —
     every branch logs loudly (TECH.md error policy).
     """
@@ -330,6 +552,8 @@ async def _handle_photo(
     log_phase_transition(logger, chat_id, session.phase, Phase.AWAITING_INTERVIEW)
     session.phase = Phase.AWAITING_INTERVIEW
     await client.send_message(chat_id=chat_id, text=verdict.message)
+    # The interview opens straight away: no extra prompt needed after "come in".
+    await _ask_question(client, interviewer, session, answer=None)
 
 
 def _install_signal_handlers(shutdown_event: asyncio.Event) -> None:
@@ -376,6 +600,7 @@ async def _poll_updates(
 async def _dispatch_update(
     client: TelegramClient,
     vision: GeminiVisionClient,
+    interviewer: InterviewerClient,
     sessions: dict[int, SessionState],
     media_root: str | Path,
     update: Update,
@@ -394,13 +619,25 @@ async def _dispatch_update(
             return
 
         session = _session_for(sessions, update.message.chat.id)
+
+        if session.phase in INTERVIEW_PHASES:
+            # Phase 3: the Interviewer owns this stage. A photo (or any other
+            # non-text input) never advances the interview - it only nudges.
+            text = None if update.message.photo else update.message.text
+            await _handle_interview(client, interviewer, session, text)
+            return
+
         if update.message.photo:
-            await _handle_photo(client, vision, session, update.message, media_root)
+            await _handle_photo(
+                client, vision, interviewer, session, update.message, media_root
+            )
             return
 
         reply = build_reply(update.message, session)
         if reply is None:
-            await _handle_photo(client, vision, session, update.message, media_root)
+            await _handle_photo(
+                client, vision, interviewer, session, update.message, media_root
+            )
             return
 
         try:
@@ -459,8 +696,9 @@ async def run_bot(
         timeout=max(30.0, poll_timeout + 10.0),
     )
     vision = GeminiVisionClient(api_key=settings.gemini_api_key)
+    interviewer = InterviewerClient(api_key=settings.gemini_api_key)
     sessions: dict[int, SessionState] = {}
-    logger.info("Starting Telegram gateway (Phase 2 - Bouncer)")
+    logger.info("Starting Telegram gateway (Phase 3 - Interviewer)")
 
     try:
         iterations = 0
@@ -477,12 +715,15 @@ async def run_bot(
             if updates is None:  # shutdown requested mid-poll
                 break
             for update in updates:
-                await _dispatch_update(client, vision, sessions, media_root, update)
+                await _dispatch_update(
+                    client, vision, interviewer, sessions, media_root, update
+                )
             # Brief pause so a hot update feed cannot spin the loop.
             await asyncio.sleep(0.01)
     finally:
         await client.close()
         await vision.close()
+        await interviewer.close()
         logger.info("Telegram gateway stopped cleanly")
 
 
