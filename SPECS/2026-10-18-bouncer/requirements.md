@@ -20,7 +20,10 @@ decides whether the uploaded photo may enter the documentary pipeline.
    subject, and a photograph of a real person — drawings, cartoons, anime,
    illustrations and obviously synthetic/artistic renderings are rejected.
    Group shots and busy frames are rejected. (Best-effort model judgment — no
-   forensic detection.)
+   forensic detection.) Only people count as subjects: a person shown in part
+   (close-up, side profile, shoulder, back, arm) or holding/wearing something is
+   still one subject; objects, pets, toys, furniture, mirrors, shadows and
+   reflections are never extra subjects.
 3. **After a rejection: ready for a new photo.** The rejection clears the bad
    photo and any partial session state, but the bot stays in the awaiting-photo
    phase — the user can immediately send another photo without `/start`.

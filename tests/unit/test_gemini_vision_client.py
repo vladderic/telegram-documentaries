@@ -99,6 +99,14 @@ class TestCheckPhoto:
         assert "two sentences" in lowered
         assert "reason" in lowered
 
+        # One person shown in part, or holding something, is still ONE subject
+        # (live validation: a shoulder-only portrait and a man holding a plush
+        # toy were both rejected as if they contained several subjects).
+        assert "in part" in lowered
+        assert "holding" in lowered
+        assert "only people count as subjects" in lowered
+        assert "two or more people" in lowered
+
         # Structured output: JSON mime type + verdict schema.
         gen = body["generationConfig"]
         assert gen["responseMimeType"] == "application/json"

@@ -50,6 +50,12 @@ traffic.
   `requirements.md`). The user explicitly accepted this limitation.
 - An accepted session gets a holding reply for any further input
   (`photo_out_of_phase` in the logs); full reset semantics arrive in Phase 7.
+- **Fixed after live validation (Phase 3 run):** the Bouncer over-rejected
+  single-person photos. A shoulder-only portrait and a man holding a plush toy
+  were both rejected as if the frame held several subjects, because the prompt
+  never said that *only people* count as subjects and that a person may be
+  shown in part. The prompt now states both explicitly (regression assertions
+  in `test_gemini_vision_client.py::test_sends_guardrailed_structured_request`).
 
 ## Spec sync (on user approval)
 
