@@ -17,7 +17,7 @@ import pytest
 from pydantic import ValidationError
 
 from telegram_documentaries import bot_gateway
-from telegram_documentaries.models import Update
+from telegram_documentaries.models import GeneratedImage, Update
 
 PLACEHOLDER_TOKEN = "123456:PLACEHOLDER-TELEGRAM-BOT-TOKEN"
 
@@ -387,3 +387,102 @@ class TestTimeoutsAndRetries:
 
         # A retried send could post the same message twice: never do it.
         assert attempts["count"] == 1
+
+
+class TestSendPhoto:
+    IMAGE = GeneratedImage(mime_type="image/jpeg", data=b"\xff\xd8\xff\xe0-hybrid")
+
+    @pytest.mark.asyncio
+    async def test_posts_a_multipart_upload_and_returns_api_payload(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(
+                200, json={"ok": True, "result": {"message_id": 101, "date": 2}}
+            )
+
+        client = make_client(handler)
+        try:
+            result = await client.send_photo(
+                chat_id=555, image=self.IMAGE, caption="Suggested casting: Red fox"
+            )
+        finally:
+            await client.close()
+
+        assert result == {"ok": True, "result": {"message_id": 101, "date": 2}}
+        request = seen[0]
+        assert seen[0].method == "POST"
+        assert seen[0].url.path == f"/bot{PLACEHOLDER_TOKEN}/sendPhoto"
+        assert seen[0].headers["content-type"].startswith("multipart/form-data")
+        body = seen[0].content
+        assert b'name="chat_id"' in body and b"555" in body
+        assert b'name="caption"' in body
+        assert b"Suggested casting: Red fox" in body
+        assert b'name="photo"; filename="portrait.jpg"' in body
+        assert b"image/jpeg" in body
+        assert b"\xff\xd8\xff\xe0-hybrid" in request.read()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("mime_type", "filename"),
+        [
+            ("image/jpeg", b'filename="portrait.jpg"'),
+            ("image/png", b'filename="portrait.png"'),
+            ("image/webp", b'filename="portrait.webp"'),
+            ("image/avif", b'filename="portrait.jpg"'),
+        ],
+    )
+    async def test_picks_a_filename_from_the_mime_type(
+        self, mime_type: str, filename: bytes
+    ) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"ok": True, "result": {}})
+
+        client = make_client(handler)
+        try:
+            await client.send_photo(
+                chat_id=555,
+                image=GeneratedImage(mime_type=mime_type, data=b"IMAGE"),
+                caption="Suggested casting: Red fox",
+            )
+        finally:
+            await client.close()
+
+        assert filename in seen[0].content
+
+    @pytest.mark.asyncio
+    async def test_stalled_photo_send_is_never_retried(self) -> None:
+        attempts = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["count"] += 1
+            raise httpx.ReadTimeout("stalled")
+
+        client = make_client(handler)
+        with pytest.raises(bot_gateway.TelegramApiError, match="ReadTimeout"):
+            await client.send_photo(chat_id=555, image=self.IMAGE, caption="caption")
+        await client.close()
+
+        # A retried upload could post the same photo twice: never do it.
+        assert attempts["count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_http_error_is_typed_and_redacts_the_token(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, text=f"bad request for {PLACEHOLDER_TOKEN}")
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(bot_gateway.TelegramApiError) as caught:
+                await client.send_photo(
+                    chat_id=555, image=self.IMAGE, caption="caption"
+                )
+        finally:
+            await client.close()
+
+        assert "400" in str(caught.value)
+        assert PLACEHOLDER_TOKEN not in str(caught.value)
