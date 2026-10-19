@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import logging
+import math
 from typing import Final, Literal
 
 import lameenc  # type: ignore[import-not-found]
@@ -126,8 +127,9 @@ def parse_pcm_format(mime_type: str) -> tuple[int, int]:
 
     Raises:
         GeminiApiError: If the media type is not the expected 16-bit PCM at the
-            expected rate and channel count. Guessing here would silently
-            mis-pitch the narrator.
+            expected rate and channel count, or declares a non-positive
+            rate/channel count. Guessing here would silently mis-pitch the
+            narrator.
     """
     parts = [section.strip() for section in mime_type.split(";")]
     container = parts[0].lower()
@@ -150,6 +152,11 @@ def parse_pcm_format(mime_type: str) -> tuple[int, int]:
             f"TTS audio format {mime_type!r} is missing a usable rate/channels"
         ) from None
 
+    if rate <= 0 or channels <= 0:
+        raise GeminiApiError(
+            f"TTS audio format {mime_type!r} declares a non-positive "
+            f"rate/channels ({rate} Hz / {channels} channel(s))"
+        )
     if rate != PCM_SAMPLE_RATE or channels != PCM_CHANNELS:
         raise GeminiApiError(
             f"TTS returned {rate} Hz / {channels} channel(s); "
@@ -209,7 +216,7 @@ class NarratorClient:
         # Telegram wants whole seconds for the waveform; round up so the
         # displayed length never undershoots the audio.
         frames = len(pcm) // ((PCM_BITS // 8) * channels)
-        duration = max(1, round(frames / rate))
+        duration = max(1, math.ceil(frames / rate))
         try:
             encoded = encode_mp3(pcm, rate, channels)
         except (ValueError, RuntimeError) as exc:

@@ -59,10 +59,15 @@ class TestParsePcmFormat:
             "audio/l16; rate=24000",  # no channel count
             "audio/l16",  # bare, unparseable
             "audio/l16; rate=abc; channels=1",  # non-numeric rate
+            "audio/l16; rate=-1; channels=1",  # negative rate
+            "audio/l16; rate=0; channels=1",  # zero rate
+            "audio/l16; rate=24000; channels=0",  # zero channels
+            "audio/l16; rate=24000; channels=-2",  # negative channels
         ],
     )
     def test_fails_loudly_on_an_unsupported_format(self, mime: str) -> None:
         # Never guessed at: a wrong rate or channel count would silently
-        # mis-time (and mis-pitch) the audio.
+        # mis-time (and mis-pitch) the audio; a non-positive value is
+        # nonsense, not a format to quietly accept.
         with pytest.raises(GeminiApiError):
             parse_pcm_format(mime)

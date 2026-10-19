@@ -120,6 +120,21 @@ class TestSpeak:
             await narrator.close()
 
     @pytest.mark.asyncio
+    async def test_duration_rounds_up_to_whole_seconds(self) -> None:
+        """A 2.5s waveform is displayed as 3s, never undercut at 2 (ceil)."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=audio_response(pcm=_pcm(seconds=2.5)))
+
+        narrator = make_narrator(handler)
+        try:
+            note = await narrator.speak(_SCRIPT)
+        finally:
+            await narrator.close()
+
+        assert note.duration == 3
+
+    @pytest.mark.asyncio
     async def test_a_truncated_payload_is_a_typed_failure(self) -> None:
         """A half-sample frame must degrade like any other TTS failure.
 
