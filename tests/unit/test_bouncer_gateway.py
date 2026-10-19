@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from telegram_documentaries import bot_gateway
-from telegram_documentaries.bouncer import GeminiApiError
+from telegram_documentaries.gemini import GeminiApiError
 from telegram_documentaries.models import (
     BouncerVerdict,
     RejectionReason,
@@ -34,6 +34,8 @@ REJECT_VERDICT = BouncerVerdict(
     reason=RejectionReason.NOT_SOLO_HUMAN,
     message="Nice ride, but I need to see YOU before the shoot.",
 )
+#: The first interview question the acceptance flow asks (Phase 3).
+FIRST_QUESTION = "What is your natural habitat?"
 
 
 def photo_update(
@@ -118,6 +120,7 @@ async def run_with_mocks(
     send: AsyncMock,
     media_root: str,
     error_backoff: float = 0.0,
+    interviewer: AsyncMock | None = None,
 ) -> None:
     """Run ``run_bot`` with Telegram + Gemini mocked out.
 
@@ -135,6 +138,11 @@ async def run_with_mocks(
         patch.object(bot_gateway, "load_settings", return_value=settings_mock()),
         patch.object(bot_gateway, "TelegramClient", return_value=mock_client),
         patch.object(bot_gateway, "GeminiVisionClient", return_value=vision),
+        patch.object(
+            bot_gateway,
+            "InterviewerClient",
+            return_value=interviewer or make_interviewer(),
+        ),
     ):
         await bot_gateway.run_bot(
             poll_timeout=0,
@@ -142,6 +150,14 @@ async def run_with_mocks(
             error_backoff=error_backoff,
             media_root=media_root,
         )
+
+
+def make_interviewer(question: str = FIRST_QUESTION) -> AsyncMock:
+    """A scripted interview client: acceptance always opens with one question."""
+    interviewer = AsyncMock()
+    interviewer.next_question = AsyncMock(return_value=question)
+    interviewer.close = AsyncMock()
+    return interviewer
 
 
 def make_vision(*, result: Any = None, side_effect: Any = None) -> AsyncMock:
@@ -162,6 +178,50 @@ def sent_texts(send: AsyncMock) -> list[str]:
 
 class TestPhotoFlow:
     @pytest.mark.asyncio
+    async def test_photo_arrival_is_acknowledged_before_the_slow_work(
+        self, tmp_path: Any
+    ) -> None:
+        """Downloading and judging takes seconds: never leave the user in silence.
+
+        Live validation: the reply could take ages with no feedback at all.
+        """
+        send = AsyncMock(return_value={"ok": True})
+        vision = make_vision(result=ACCEPT_VERDICT)
+        download = AsyncMock(return_value=b"JPEG-BYTES")
+
+        await run_with_mocks(
+            [[photo_update(1, 555)], []],
+            vision=vision,
+            download=download,
+            send=send,
+            media_root=str(tmp_path),
+        )
+
+        assert sent_texts(send) == [
+            bot_gateway.PHOTO_HOLD_MSG,
+            ACCEPT_VERDICT.message,
+            FIRST_QUESTION,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_rejected_photo_is_also_acknowledged_first(
+        self, tmp_path: Any
+    ) -> None:
+        send = AsyncMock(return_value={"ok": True})
+        vision = make_vision(result=REJECT_VERDICT)
+        download = AsyncMock(return_value=b"JPEG-BYTES")
+
+        await run_with_mocks(
+            [[photo_update(1, 555)], []],
+            vision=vision,
+            download=download,
+            send=send,
+            media_root=str(tmp_path),
+        )
+
+        assert sent_texts(send) == [bot_gateway.PHOTO_HOLD_MSG, REJECT_VERDICT.message]
+
+    @pytest.mark.asyncio
     async def test_accepted_photo_is_stored_and_advances_the_phase(
         self, tmp_path: Any
     ) -> None:
@@ -171,7 +231,7 @@ class TestPhotoFlow:
 
         await run_with_mocks(
             # Second photo arrives after acceptance: the bouncer must NOT run
-            # again (phase advanced) - it gets the holding reply instead.
+            # again (phase advanced) - the interview nudges and repeats Q1.
             [[photo_update(1, 555), photo_update(2, 555)], []],
             vision=vision,
             download=download,
@@ -180,8 +240,10 @@ class TestPhotoFlow:
         )
 
         assert sent_texts(send) == [
+            bot_gateway.PHOTO_HOLD_MSG,
             ACCEPT_VERDICT.message,
-            bot_gateway.LATER_PHASE_REPLY,
+            FIRST_QUESTION,
+            f"{bot_gateway.INTERVIEW_NUDGE}\n\n{FIRST_QUESTION}",
         ]
         vision.check_photo.assert_awaited_once()
         stored = tmp_path / "555" / "portrait.jpg"
@@ -204,7 +266,13 @@ class TestPhotoFlow:
             media_root=str(tmp_path),
         )
 
-        assert sent_texts(send) == [REJECT_VERDICT.message, ACCEPT_VERDICT.message]
+        assert sent_texts(send) == [
+            bot_gateway.PHOTO_HOLD_MSG,
+            REJECT_VERDICT.message,
+            bot_gateway.PHOTO_HOLD_MSG,
+            ACCEPT_VERDICT.message,
+            FIRST_QUESTION,
+        ]
         # Both photos were judged: the retry went straight back to the bouncer.
         assert vision.check_photo.await_count == 2
         # Only the accepted photo was stored.
@@ -226,7 +294,7 @@ class TestPhotoFlow:
             media_root=str(tmp_path),
         )
 
-        assert sent_texts(send) == [REJECT_VERDICT.message]
+        assert sent_texts(send) == [bot_gateway.PHOTO_HOLD_MSG, REJECT_VERDICT.message]
         assert not (tmp_path / "777").exists()
 
     @pytest.mark.asyncio
@@ -248,6 +316,7 @@ class TestPhotoFlow:
             )
 
         assert sent_texts(send) == [
+            bot_gateway.PHOTO_HOLD_MSG,
             bot_gateway.BOUNCER_RETRY_MSG,
             bot_gateway.PHOTO_NUDGE,
         ]
@@ -276,7 +345,10 @@ class TestPhotoFlow:
             media_root=str(tmp_path),
         )
 
-        assert sent_texts(send) == [bot_gateway.PHOTO_TOO_LARGE_MSG]
+        assert sent_texts(send) == [
+            bot_gateway.PHOTO_HOLD_MSG,
+            bot_gateway.PHOTO_TOO_LARGE_MSG,
+        ]
         download.assert_not_awaited()
         vision.check_photo.assert_not_awaited()
 

@@ -68,3 +68,37 @@ def test_accept_verdict_must_not_carry_a_reason() -> None:
             reason=RejectionReason.NOT_SOLO_HUMAN,
             message="Come in.",
         )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            {"accepted": True, "observed_subject": "", "message": "Come in."},
+            id="empty-subject",
+        ),
+        pytest.param(
+            {"accepted": True, "observed_subject": "   ", "message": "Come in."},
+            id="blank-subject",
+        ),
+        pytest.param(
+            {"accepted": True, "observed_subject": "a person", "message": ""},
+            id="empty-message",
+        ),
+        pytest.param(
+            {"accepted": True, "observed_subject": "a person", "message": "  "},
+            id="blank-message",
+        ),
+    ],
+)
+def test_blank_string_fields_fail_as_validation_errors(
+    payload: dict[str, object],
+) -> None:
+    """Category guard: validators must raise ValueError, not TypeError.
+
+    Pydantic only wraps ValueError into ValidationError. A TypeError would
+    escape the gateway's ``except ValidationError`` and the user would get no
+    reply at all (the failure would surface only as a catch-all log).
+    """
+    with pytest.raises(ValidationError):
+        BouncerVerdict.model_validate(payload)

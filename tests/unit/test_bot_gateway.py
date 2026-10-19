@@ -195,22 +195,31 @@ class TestRunBotBasicFlow:
         mock_client.close.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_client_read_timeout_outlives_the_long_poll(self) -> None:
-        """Otherwise every long poll would race its own HTTP read timeout."""
+    async def test_client_keeps_the_short_timeout_while_the_poll_window_is_passed(
+        self,
+    ) -> None:
+        """Only `getUpdates` waits for the long poll; other calls fail fast.
+
+        The client is built with its short default (a 40s read timeout for a
+        stalled download was the live-validation 38s freeze).
+        """
         mock_client = AsyncMock()
         mock_client.get_updates = AsyncMock(return_value=[])
         mock_client.close = AsyncMock()
+        settings = make_settings()
 
         with (
-            patch.object(bot_gateway, "load_settings", return_value=make_settings()),
+            patch.object(bot_gateway, "load_settings", return_value=settings),
             patch.object(
                 bot_gateway, "TelegramClient", return_value=mock_client
             ) as client_cls,
         ):
             await bot_gateway.run_bot(poll_timeout=7, max_iterations=1)
 
-        client_timeout = client_cls.call_args.kwargs["timeout"]
-        assert client_timeout > 7
+        # No timeout override: the client keeps API_TIMEOUT_SECONDS.
+        assert client_cls.call_args.kwargs == {"token": settings.telegram_bot_token}
+        # The long-poll window travels with the poll call instead.
+        mock_client.get_updates.assert_awaited_with(poll_timeout=7)
 
 
 class TestRunBotResilience:

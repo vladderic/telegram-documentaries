@@ -16,7 +16,8 @@ from typing import Any
 import httpx
 import pytest
 
-from telegram_documentaries.bouncer import GeminiApiError, GeminiVisionClient
+from telegram_documentaries.bouncer import GeminiVisionClient
+from telegram_documentaries.gemini import GeminiApiError
 
 PLACEHOLDER_API_KEY = "PLACEHOLDER-GEMINI-API-KEY"
 
@@ -97,6 +98,14 @@ class TestCheckPhoto:
         assert "cartoon" in lowered or "drawing" in lowered
         assert "two sentences" in lowered
         assert "reason" in lowered
+
+        # One person shown in part, or holding something, is still ONE subject
+        # (live validation: a shoulder-only portrait and a man holding a plush
+        # toy were both rejected as if they contained several subjects).
+        assert "in part" in lowered
+        assert "holding" in lowered
+        assert "only people count as subjects" in lowered
+        assert "two or more people" in lowered
 
         # Structured output: JSON mime type + verdict schema.
         gen = body["generationConfig"]
