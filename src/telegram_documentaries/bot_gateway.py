@@ -3,7 +3,8 @@
 Responsibilities:
 - load secrets from ``.env`` (never hardcode, never log them),
 - long-poll Telegram (``getUpdates``) and route each update to the current
-  pipeline stage (Bouncer vision gate, Interviewer, Converter, Scripter),
+  pipeline stage (Bouncer vision gate, Interviewer, Converter, Scripter,
+  Narrator),
 - fail loudly with a clear log when configuration is missing,
 - shut down gracefully on Ctrl+C / SIGTERM, even mid-poll.
 
@@ -91,8 +92,8 @@ PHOTO_NUDGE = (
     "Send me a photograph and we will get you on camera."
 )
 #: Input that arrives once the pipeline has moved past the stage that would
-#: reply to it: the crew has no further dialogue yet (Phase 6 adds the voice
-#: note), so the session simply holds.
+#: reply to it: the voice note was the documentary's last scene, so the crew
+#: has no further dialogue and the session simply holds.
 LATER_PHASE_REPLY = (
     "One moment - the crew is still setting up this scene. Give me a beat to catch up."
 )
@@ -687,8 +688,10 @@ async def _narrate(
     exact text the user already read (``session.script_text``), so the voice
     note can never say something the user never saw. The stage is claimed
     *before* the model call, and the one-note-per-session flag is set only once
-    the upload succeeds - a failure leaves the session in ``NARRATE`` so the
-    words survive without a second note.
+    the upload succeeds. Every failure - TTS, encode or upload - degrades
+    in-character and still ends in ``DONE`` (which covers "synthesis failed and
+    the pipeline gave up gracefully"), so the words survive and no second note
+    can start.
 
     Args:
         client: Telegram client for the voice upload.
@@ -707,9 +710,13 @@ async def _narrate(
         return
     try:
         note = await narrator.speak(text)
-    except (GeminiApiError, TelegramApiError):
+    except (GeminiApiError, TelegramApiError, ValueError, RuntimeError):
+        # The Narrator's contract is typed, but the encoder beneath it fails
+        # raw (ValueError/RuntimeError): the conversation path degrades on
+        # those too, so a truncated payload can never strand the session.
         logger.exception("narrator failed chat_id=%s", chat_id)
         await _send(client, chat_id, NARRATOR_FAILURE_MSG)
+        _advance_to_done(session, chat_id)
         return
 
     try:
@@ -717,6 +724,7 @@ async def _narrate(
     except TelegramApiError:
         logger.exception("narrator upload failed chat_id=%s", chat_id)
         await _send(client, chat_id, NARRATOR_FAILURE_MSG)
+        _advance_to_done(session, chat_id)
         return
     session.voice_note_sent = True
     logger.info(

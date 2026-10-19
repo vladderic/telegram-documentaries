@@ -199,7 +199,9 @@ class NarratorClient:
 
         Raises:
             GeminiApiError: On transport/HTTP failures, a malformed inline audio
-                part, or an unsupported audio format.
+                part, an unsupported audio format, or a payload the MP3 encoder
+                rejects (truncated frames, encoder failure) — every internal
+                failure is typed before it leaves this boundary.
         """
         audio = await self._client.generate_audio(script, voice=self._voice)
         pcm = _decode_audio(audio)
@@ -208,7 +210,17 @@ class NarratorClient:
         # displayed length never undershoots the audio.
         frames = len(pcm) // ((PCM_BITS // 8) * channels)
         duration = max(1, round(frames / rate))
-        return VoiceNote(data=encode_mp3(pcm, rate, channels), duration=duration)
+        try:
+            encoded = encode_mp3(pcm, rate, channels)
+        except (ValueError, RuntimeError) as exc:
+            # The encode step fails untyped (ValueError on a truncated
+            # payload, RuntimeError from the lameenc C extension); the client
+            # boundary makes it the typed error the gateway degrades on,
+            # exactly like the parse step above.
+            raise GeminiApiError(
+                f"TTS audio could not be encoded ({type(exc).__name__}): {exc}"
+            ) from exc
+        return VoiceNote(data=encoded, duration=duration)
 
 
 def _decode_audio(audio: InlineAudio) -> bytes:

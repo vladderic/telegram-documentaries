@@ -635,6 +635,42 @@ class TestTheVoiceNoteClosesTheDocumentary:
         assert NARRATION in texts  # the narration still reached the chat
         assert bot_gateway.NARRATOR_FAILURE_MSG in texts
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                ValueError("cannot encode empty PCM audio"), id="encode-value-error"
+            ),
+            pytest.param(RuntimeError("lameenc encoder exploded"), id="encoder-error"),
+        ],
+    )
+    async def test_a_raw_encoder_failure_never_crashes_the_loop(
+        self, tmp_path: Any, failure: Exception
+    ) -> None:
+        """Even an untyped encoder failure degrades in character, end to end."""
+        send = AsyncMock(return_value={"ok": True})
+        send_voice = AsyncMock(return_value={"ok": True})
+        narrator = FakeNarrator([failure])
+
+        await run_updates(
+            FINISH_UPDATES,
+            interviewer=FakeInterviewer(),
+            scripter=FakeScripter(),
+            send=send,
+            send_photo=AsyncMock(return_value={"ok": True}),
+            converter=FakeConverter(),
+            media_root=str(tmp_path),
+            narrator=narrator,
+            send_voice=send_voice,
+        )
+
+        texts = [call.kwargs["text"] for call in send.await_args_list]
+        assert NARRATION in texts
+        assert bot_gateway.NARRATOR_FAILURE_MSG in texts
+        send_voice.assert_not_awaited()
+        assert len(narrator.calls) == 1  # no retry
+
 
 class TestNarrate:
     """The Phase 6 stage in isolation: the voice from the delivered words."""
@@ -672,7 +708,7 @@ class TestNarrate:
         assert any("NARRATE" in m and "DONE" in m for m in messages)
         assert any("voice_note_delivered" in m for m in messages)
 
-    async def test_a_failed_tts_degrades_keeps_the_words_and_stops_at_narrate(
+    async def test_a_failed_tts_degrades_keeps_the_words_and_ends_done(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         session = SessionState(chat_id=555, phase=Phase.SCRIPT)
@@ -688,11 +724,43 @@ class TestNarrate:
             client.send_message.await_args.kwargs["text"]
             == bot_gateway.NARRATOR_FAILURE_MSG
         )
-        # The stage is claimed before the call, so a failure can never re-open
-        # the pipeline; the words survive in the chat.
-        assert session.phase is Phase.NARRATE
+        # DONE covers "synthesis failed and the pipeline gave up gracefully"
+        # (requirements): a failure can never re-open the pipeline, and the
+        # words survive in the chat.
+        assert session.phase is Phase.DONE
         assert session.voice_note_sent is False
         assert session.script_text == NARRATION
+        client.send_voice.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                ValueError("cannot encode empty PCM audio"), id="encode-value-error"
+            ),
+            pytest.param(RuntimeError("lameenc encoder exploded"), id="encoder-error"),
+        ],
+    )
+    async def test_a_raw_encoder_failure_still_degrades_in_character(
+        self, failure: Exception
+    ) -> None:
+        """The raw types the encoder can raise must never strand the session."""
+        session = SessionState(chat_id=555, phase=Phase.SCRIPT)
+        session.script_text = NARRATION
+        client = AsyncMock()
+        client.send_message = AsyncMock(return_value={"ok": True})
+        narrator = FakeNarrator([failure])
+
+        await bot_gateway._narrate(client, cast(Any, narrator), session)
+
+        assert (
+            client.send_message.await_args.kwargs["text"]
+            == bot_gateway.NARRATOR_FAILURE_MSG
+        )
+        assert session.script_text == NARRATION  # the narration text still stands
+        assert session.phase is Phase.DONE
+        assert session.voice_note_sent is False
+        client.send_voice.assert_not_awaited()  # no crash, no retry
 
     async def test_a_failed_upload_never_sends_a_second_note(
         self, caplog: pytest.LogCaptureFixture
@@ -708,7 +776,7 @@ class TestNarrate:
         await bot_gateway._narrate(client, cast(Any, FakeNarrator()), session)
 
         assert session.voice_note_sent is False
-        assert session.phase is Phase.NARRATE
+        assert session.phase is Phase.DONE
         assert (
             client.send_message.await_args.kwargs["text"]
             == bot_gateway.NARRATOR_FAILURE_MSG

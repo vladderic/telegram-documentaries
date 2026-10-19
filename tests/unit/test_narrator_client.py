@@ -10,10 +10,12 @@ import base64
 import json
 import struct
 from collections.abc import Callable
+from unittest.mock import patch
 
 import httpx
 import pytest
 
+from telegram_documentaries import narrator as narrator_module
 from telegram_documentaries.gemini import GeminiApiError, GeminiClient
 from telegram_documentaries.narrator import (
     DEFAULT_VOICE,
@@ -116,6 +118,46 @@ class TestSpeak:
                 await narrator.speak(_SCRIPT)
         finally:
             await narrator.close()
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_payload_is_a_typed_failure(self) -> None:
+        """A half-sample frame must degrade like any other TTS failure.
+
+        ``encode_mp3`` raises ``ValueError`` on an odd-byte-length payload;
+        the client boundary turns that into the typed ``GeminiApiError`` the
+        gateway's degrade path catches — never a raw exception.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=audio_response(pcm=b"\x01\x02\x03"))
+
+        narrator = make_narrator(handler)
+        try:
+            with pytest.raises(GeminiApiError):
+                await narrator.speak(_SCRIPT)
+        finally:
+            await narrator.close()
+
+    @pytest.mark.asyncio
+    async def test_an_encoder_failure_is_typed_and_chained(self) -> None:
+        """``lameenc`` raises ``RuntimeError``; it must not escape untyped."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=audio_response())
+
+        narrator = make_narrator(handler)
+        try:
+            with (
+                pytest.raises(GeminiApiError) as caught,
+                patch.object(
+                    narrator_module, "encode_mp3", side_effect=RuntimeError("boom")
+                ),
+            ):
+                await narrator.speak(_SCRIPT)
+        finally:
+            await narrator.close()
+
+        assert isinstance(caught.value.__cause__, RuntimeError)
 
     @pytest.mark.asyncio
     async def test_http_error_is_typed_and_never_leaks_the_key(self) -> None:
