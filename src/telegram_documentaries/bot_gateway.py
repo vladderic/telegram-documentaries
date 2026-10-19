@@ -34,6 +34,7 @@ from telegram_documentaries.config import (
     install_secret_redaction,
     load_settings,
 )
+from telegram_documentaries.converter import ConverterClient
 from telegram_documentaries.gemini import GeminiApiError
 from telegram_documentaries.interviewer import (
     MAX_QUESTIONS,
@@ -70,6 +71,10 @@ POLL_TIMEOUT_HEADROOM = 10.0
 #: Where accepted portraits are stored (gitignored; keyed per chat_id).
 DEFAULT_MEDIA_ROOT = ".tmp/media"
 
+#: Accepted portraits are always persisted as JPEG by ``_store_photo``, so the
+#: Converter is told the same media type the file on disk actually has.
+PORTRAIT_MIME_TYPE = "image/jpeg"
+
 #: Phases owned by the Interviewer (Phase 3): text is an answer, anything else
 #: (or nothing at all) only nudges.
 INTERVIEW_PHASES = frozenset({Phase.AWAITING_INTERVIEW, Phase.INTERVIEW})
@@ -102,6 +107,25 @@ INTERVIEW_NUDGE = (
 #: and the user should never be left staring at silence (live-validation
 #: finding - one stalled download left the reply hanging for 38s).
 PHOTO_HOLD_MSG = "One moment - the crew is taking a proper look at this one."
+
+#: Catch-all after an unexpected failure on the conversation path.
+DISPATCH_FAILURE_MSG = (
+    "Something went sideways backstage and that take was lost - do try once more."
+)
+#: Sent the instant the interview closes: fusing the portrait takes seconds and
+#: the user should never be left staring at the reveal (Phase 3 lesson).
+PORTRAIT_HOLD_MSG = (
+    "One moment - the darkroom is developing your portrait. "
+    "A hybrid needs a little time to settle."
+)
+#: The Converter failed (model, transport or unreadable portrait): degrade in
+#: character. The session stays in CONVERT, so no new run can start.
+PORTRAIT_FAILURE_MSG = (
+    "Curses - the darkroom door jammed shut mid-develop and your portrait "
+    "never came out. That frame is lost to the archive."
+)
+#: The hybrid portrait's caption: it names the species the crew cast them as.
+PORTRAIT_CAPTION_TEMPLATE = "Suggested casting: {animal}"
 
 #: Safety margin for the answer guard. Telegram timestamps carry a 1s
 #: resolution and the bot's clock need not match the server's, so a message is
@@ -516,15 +540,77 @@ async def _ask_question(
     return True
 
 
+async def _deliver_portrait(
+    client: TelegramClient,
+    converter: ConverterClient,
+    session: SessionState,
+    profile: BehaviouralProfile,
+) -> None:
+    """Hold, generate the hybrid portrait and upload it; never raises.
+
+    The final stage of the happy path: the stored reference photo plus the
+    dossier go to the Converter, and one captioned image comes back to the
+    chat. Every failure (unreadable portrait, model failure, upload failure)
+    degrades in character instead of raising, so the polling loop survives and
+    the session simply stays in ``CONVERT``.
+
+    Args:
+        client: Telegram client for the hold line and the upload.
+        converter: Converter client (the image model call).
+        session: The finished session (its stored portrait is read).
+        profile: The dossier to fuse with the portrait.
+    """
+    chat_id = session.chat_id
+    # Generation takes seconds: say something first, exactly like the photo
+    # hold line (the user must never stare at silence mid-pipeline).
+    await _send(client, chat_id, PORTRAIT_HOLD_MSG)
+
+    stored_path = session.photo_local_path
+    try:
+        if not stored_path:
+            # Only reachable if a finish route ran without a stored photo.
+            raise FileNotFoundError("session has no stored portrait path")
+        portrait = Path(stored_path).read_bytes()
+    except OSError:
+        logger.exception(
+            "portrait unavailable chat_id=%s path=%r", chat_id, stored_path
+        )
+        await _send(client, chat_id, PORTRAIT_FAILURE_MSG)
+        return
+
+    try:
+        image = await converter.fuse(portrait, PORTRAIT_MIME_TYPE, profile)
+    except (GeminiApiError, TelegramApiError):
+        logger.exception("converter failed chat_id=%s", chat_id)
+        await _send(client, chat_id, PORTRAIT_FAILURE_MSG)
+        return
+
+    caption = PORTRAIT_CAPTION_TEMPLATE.format(animal=profile.suggested_animal)
+    try:
+        await client.send_photo(chat_id=chat_id, image=image, caption=caption)
+    except Exception:
+        logger.exception("failed to send portrait chat_id=%s", chat_id)
+        await _send(client, chat_id, PORTRAIT_FAILURE_MSG)
+        return
+    logger.info(
+        "portrait_delivered chat_id=%s animal=%r bytes=%s",
+        chat_id,
+        profile.suggested_animal,
+        len(image.data),
+    )
+
+
 async def _finish_interview(
     client: TelegramClient,
+    converter: ConverterClient,
     session: SessionState,
     final_profile: BehaviouralProfile,
 ) -> None:
-    """Store the dossier, move to CONVERT and reveal the case file.
+    """Store the dossier, move to CONVERT, reveal the case file, convert.
 
     The single finish path for both routes into it (the model chose FINISH, or
-    the ceiling forced it), so the reveal template is formatted in one place.
+    the ceiling forced it), so the reveal template is formatted in one place
+    and no finish route can skip the Converter.
     """
     chat_id = session.chat_id
     session.interview.profile = final_profile
@@ -545,10 +631,12 @@ async def _finish_interview(
             animal_description=final_profile.animal_description,
         ),
     )
+    await _deliver_portrait(client, converter, session, final_profile)
 
 
 async def _handle_answer(
     client: TelegramClient,
+    converter: ConverterClient,
     interviewer: InterviewerClient,
     session: SessionState,
     answer: str,
@@ -587,7 +675,7 @@ async def _handle_answer(
             return
         interview.answers.append(InterviewAnswer(question=pending, answer=answer))
         interview.pending_question = None
-        await _finish_interview(client, session, distilled)
+        await _finish_interview(client, converter, session, distilled)
         return
 
     try:
@@ -615,7 +703,7 @@ async def _handle_answer(
             logger.error("interview_finish_without_profile chat_id=%s", chat_id)
             await _send(client, chat_id, INTERVIEW_RETRY_MSG)
             return
-        await _finish_interview(client, session, final_profile)
+        await _finish_interview(client, converter, session, final_profile)
         return
 
     question = step.question
@@ -630,6 +718,7 @@ async def _handle_answer(
 
 async def _handle_interview(
     client: TelegramClient,
+    converter: ConverterClient,
     interviewer: InterviewerClient,
     session: SessionState,
     message: Message,
@@ -685,7 +774,7 @@ async def _handle_interview(
         await _send(client, chat_id, f"{INTERVIEW_NUDGE}\n\n{pending}")
         return
 
-    await _handle_answer(client, interviewer, session, answer)
+    await _handle_answer(client, converter, interviewer, session, answer)
 
 
 async def _handle_photo(
@@ -809,6 +898,7 @@ async def _poll_updates(
 async def _dispatch_update(
     client: TelegramClient,
     vision: GeminiVisionClient,
+    converter: ConverterClient,
     interviewer: InterviewerClient,
     sessions: dict[int, SessionState],
     media_root: str | Path,
@@ -832,7 +922,9 @@ async def _dispatch_update(
         if session.phase in INTERVIEW_PHASES:
             # Phase 3: the Interviewer owns this stage. A photo (or any other
             # non-text input) never advances the interview - it only nudges.
-            await _handle_interview(client, interviewer, session, update.message)
+            await _handle_interview(
+                client, converter, interviewer, session, update.message
+            )
             return
 
         if update.message.photo:
@@ -902,8 +994,9 @@ async def run_bot(
     client = TelegramClient(token=settings.telegram_bot_token)
     vision = GeminiVisionClient(api_key=settings.gemini_api_key)
     interviewer = InterviewerClient(api_key=settings.gemini_api_key)
+    converter = ConverterClient(api_key=settings.gemini_api_key)
     sessions: dict[int, SessionState] = {}
-    logger.info("Starting Telegram gateway (Phase 3 - Interviewer)")
+    logger.info("Starting Telegram gateway (Phase 4 - Converter)")
 
     try:
         iterations = 0
@@ -921,7 +1014,7 @@ async def run_bot(
                 break
             for update in updates:
                 await _dispatch_update(
-                    client, vision, interviewer, sessions, media_root, update
+                    client, vision, converter, interviewer, sessions, media_root, update
                 )
             # Brief pause so a hot update feed cannot spin the loop.
             await asyncio.sleep(0.01)
@@ -929,6 +1022,7 @@ async def run_bot(
         await client.close()
         await vision.close()
         await interviewer.close()
+        await converter.close()
         logger.info("Telegram gateway stopped cleanly")
 
 
