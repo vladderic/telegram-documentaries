@@ -5,11 +5,14 @@ documentary about you — hybrid human-animal portrait plus a dramatic
 British-documentary voiceover, all inside one Telegram conversation.
 The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 
-> **Status: Phase 2 — Bouncer.** The bot boots, long-polls Telegram, and
+> **Status: Phase 3 — Interviewer.** The bot boots, long-polls Telegram, and
 > gates every conversation on a portrait photo: a Gemini vision verdict
 > accepts a solo real human (storing the photo and advancing the session) or
-> rejects everything else with a content-specific, in-character quip. The
-> remaining pipeline stages arrive in later phases
+> rejects everything else with a content-specific, in-character quip. An
+> accepted photo is then interviewed: 5–7 adaptive questions, one per message,
+> ending in a case-file reveal of the dossier, the suggested animal (a bare
+> species name) and a one-line description of it. The remaining stages —
+> Converter, Scripter, Narrator — arrive in later phases
 > ([`SPECS/ROADMAP.md`](SPECS/ROADMAP.md)).
 
 ## Pipeline (target architecture)
@@ -45,7 +48,7 @@ Environment variables (loaded from `.env`; never committed, never logged):
 | Variable | Purpose |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | **Required.** Token from [@BotFather](https://t.me/BotFather). Startup fails loudly with a clear log if it is missing or empty. |
-| `GEMINI_API_KEY` | **Required.** Key from [Google AI Studio](https://aistudio.google.com/apikey); the Bouncer calls Gemini vision on every photo. Startup fails loudly if it is missing or empty. |
+| `GEMINI_API_KEY` | **Required.** Key from [Google AI Studio](https://aistudio.google.com/apikey); the Bouncer calls Gemini vision on every photo and the Interviewer calls Gemini text on every question. Startup fails loudly if it is missing or empty. |
 
 ## Run the bot
 
@@ -53,12 +56,21 @@ Environment variables (loaded from `.env`; never committed, never logged):
 python -m telegram_documentaries
 ```
 
-It long-polls Telegram (`getUpdates`) and runs the Bouncer: any text or
-non-photo input gets an in-character nudge to send a photograph; a photo is
-judged by Gemini (accept → photo stored under `.tmp/` and the session
-advances; reject → a specific in-character quip and a clean retry). Shut
-down gracefully with **Ctrl+C** or **SIGTERM** — even while a long poll is
-in flight.
+It long-polls Telegram (`getUpdates`) and runs the two stages built so far:
+
+1. **Bouncer** — any text or non-photo input gets an in-character nudge to send
+   a photograph; a photo gets an immediate hold-line and is then judged by
+   Gemini vision (accept → the photo is stored under `.tmp/` and the session
+   advances; reject → a specific in-character quip and a clean retry).
+2. **Interviewer** — an accepted photo gets a short confirmation and the first
+   of 5–7 interview questions, one per message, adapted to the answers given
+   so far. A message queued *before* the pending question went out is nudged
+   rather than recorded. When the interview ends (the model decides, inside the
+   5–7 window), the bot reveals the case file: profile, the suggested animal as
+   a bare species name, and a one-line description of it.
+
+Shut down gracefully with **Ctrl+C** or **SIGTERM** — even while a long poll is
+in flight. Sessions live in memory only, so a restart means a fresh photo.
 
 ## Development scripts
 
@@ -112,10 +124,12 @@ scripts/test
 ```
 src/telegram_documentaries/
   config.py        # .env loading, Settings, secret-redacting log filter
-  models.py        # typed Pydantic models (phases, verdicts, Telegram updates)
+  models.py        # typed Pydantic models (phases, verdicts, interview contracts)
+  gemini.py        # shared Gemini REST client (auth header, timeouts, errors)
   bouncer.py       # Gemini vision client: photo → structured accept/reject verdict
+  interviewer.py   # Gemini text client: adaptive questions + dossier/profile
   logging_utils.py # async-call timing + phase-transition log helpers
-  bot_gateway.py   # entry point: long-polling loop, photo flow, shutdown
+  bot_gateway.py   # entry point: long-polling loop, photo + interview flows
   __main__.py      # python -m telegram_documentaries
 tests/unit/        # Red/Green test suite
 scripts/           # dev scripts: test, hooks (ground truth, see TECH.md)

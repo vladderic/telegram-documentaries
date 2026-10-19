@@ -25,8 +25,8 @@ after each task group and `./scripts/hooks` before committing.
 
 4. Red tests for `InterviewAnswer`, `InterviewStep` (ASK/FINISH consistency:
    ASK requires a question and forbids profile fields; FINISH requires profile +
-   animal and forbids a question; junk payloads fail loudly) and
-   `BehaviouralProfile` (non-empty fields).
+   animal + animal description and forbids a question; junk payloads fail
+   loudly) and `BehaviouralProfile` (non-empty fields).
 5. Red tests for `InterviewState` nested in `SessionState`: derived question
    number (`len(answers) + 1`), finished derivation, `clear()` resets the
    interview, per-`chat_id` isolation.
@@ -39,12 +39,16 @@ after each task group and `./scripts/hooks` before committing.
      in the prompt guardrail text;
    - `next_step(transcript) -> InterviewStep` — both ASK and FINISH payloads
      parse, malformed payload raises `GeminiApiError`;
-   - `distil(transcript) -> BehaviouralProfile` — profile + real-animal field;
+   - `distil(transcript) -> BehaviouralProfile` — profile, bare species name and
+     its one-line description (two fields, two jobs: Phase 4 draws the name, the
+     reveal speaks the description);
    - transcript building caps very long answers and includes every Q/A pair;
    - the prompt text carries the voice rules (single question, no repeats,
      third-person profile) — asserted, not just hoped.
 8. Implement `interviewer.py`: `INTERVIEWER_MODEL`, `MIN_QUESTIONS = 5`,
-   `MAX_QUESTIONS = 7`, prompts, JSON schemas, the three methods.
+   `MAX_QUESTIONS = 7`, prompts, JSON schemas (with `description` hints on the
+   animal fields — the live "a common pigeon, constantly pecking…" output proved
+   prose rules alone are not enough), the three methods.
 
 ## Task group 4 — Gateway wiring (the state machine)
 
@@ -55,8 +59,9 @@ after each task group and `./scripts/hooks` before committing.
      (`distil` called, `next_step` not);
    - below 5 answers `next_step` is never allowed to finish (only
      `next_question` is called);
-   - finish → case-file reveal sent, `BehaviouralProfile` stored, phase
-     `CONVERT`, further input gets the holding reply;
+   - finish → case-file reveal sent (profile + bare animal name + one-line
+     animal description), `BehaviouralProfile` stored, phase `CONVERT`, further
+     input gets the holding reply;
    - non-text / empty / whitespace text → nudge + repeat pending question, no
      advance, no model call;
    - model failure → answers preserved, pending question unchanged, in-character

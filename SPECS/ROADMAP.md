@@ -79,7 +79,7 @@ OOM kill, box restart) never leaves it silently offline.
 |-------|--------|
 | 1 — Repository & gateway | Complete |
 | 2 — Bouncer | Complete |
-| 3 — Interviewer | In progress |
+| 3 — Interviewer | Complete |
 | 4 — Converter | Not started |
 | 5 — Scripter | Not started |
 | 6 — Narrator | Not started |
