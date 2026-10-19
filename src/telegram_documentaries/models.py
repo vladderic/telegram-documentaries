@@ -105,7 +105,7 @@ class Message(BaseModel):
     def validate_text_type(cls, v: str | None) -> str | None:
         """Ensure text is a string if present."""
         if v is not None and not isinstance(v, str):
-            raise TypeError("text must be a string")
+            raise ValueError("text must be a string")
         return v
 
     @field_validator("caption")
@@ -113,7 +113,7 @@ class Message(BaseModel):
     def validate_caption_type(cls, v: str | None) -> str | None:
         """Ensure caption is a string if present."""
         if v is not None and not isinstance(v, str):
-            raise TypeError("caption must be a string")
+            raise ValueError("caption must be a string")
         return v
 
 
@@ -141,12 +141,138 @@ class UpdateResult(RootModel[list[Update]]):
 # Session state models (per-chat_id)
 
 
+# Interview contracts and state (Phase 3). Defined before SessionState so the
+# nested default factory can reference InterviewState directly.
+
+
+class InterviewAction(StrEnum):
+    """What the model decided after reading the transcript."""
+
+    ASK = "ASK"
+    FINISH = "FINISH"
+
+
+class InterviewAnswer(BaseModel):
+    """One completed question/answer turn (both fields non-empty)."""
+
+    question: str
+    answer: str
+
+    model_config = {
+        "extra": "ignore",
+    }
+
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("question must be a non-empty string")
+        return v.strip()
+
+    @field_validator("answer")
+    @classmethod
+    def validate_answer(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("answer must be a non-empty string")
+        return v.strip()
+
+
+class InterviewStep(BaseModel):
+    """The model's decision: ask the next question, or finish.
+
+    The consistency validator is the contract guarantee: an ASK step carries
+    exactly a question, a FINISH step carries exactly the profile and animal.
+    A malformed model response can never leak downstream as a raw dict.
+    """
+
+    action: InterviewAction
+    question: str | None = None
+    profile: str | None = None
+    suggested_animal: str | None = None
+
+    model_config = {
+        "extra": "ignore",
+    }
+
+    @model_validator(mode="after")
+    def validate_action_consistency(self) -> InterviewStep:
+        if self.action is InterviewAction.ASK:
+            if not isinstance(self.question, str) or not self.question.strip():
+                raise ValueError("an ASK step must carry a non-empty question")
+            if self.profile is not None or self.suggested_animal is not None:
+                raise ValueError("an ASK step must not carry profile fields")
+        else:  # FINISH
+            if not isinstance(self.profile, str) or not self.profile.strip():
+                raise ValueError("a FINISH step must carry a non-empty profile")
+            if (
+                not isinstance(self.suggested_animal, str)
+                or not self.suggested_animal.strip()
+            ):
+                raise ValueError("a FINISH step must carry a non-empty animal")
+            if self.question is not None:
+                raise ValueError("a FINISH step must not carry a question")
+        return self
+
+
+class BehaviouralProfile(BaseModel):
+    """The Interviewer's output: the dossier that fuels later stages."""
+
+    profile: str
+    suggested_animal: str
+
+    model_config = {
+        "extra": "ignore",
+    }
+
+    @field_validator("profile")
+    @classmethod
+    def validate_profile(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("profile must be a non-empty string")
+        return v.strip()
+
+    @field_validator("suggested_animal")
+    @classmethod
+    def validate_suggested_animal(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("suggested_animal must be a non-empty string")
+        return v.strip()
+
+
+class InterviewState(BaseModel):
+    """Typed interview progress for one chat.
+
+    Single source of truth: the question a user is answering is derived from
+    ``len(answers) + 1`` and "finished" is derived from a stored profile - no
+    redundant counters that can drift.
+    """
+
+    answers: list[InterviewAnswer] = Field(default_factory=list)
+    pending_question: str | None = None
+    profile: BehaviouralProfile | None = None
+
+    model_config = {
+        "extra": "ignore",
+    }
+
+    @property
+    def next_question_number(self) -> int:
+        """The 1-based number of the question that will be asked next."""
+        return len(self.answers) + 1
+
+    @property
+    def is_finished(self) -> bool:
+        """True once the profile has been produced."""
+        return self.profile is not None
+
+
 class SessionState(BaseModel):
     """Typed per-chat_id session state.
 
-    The schema is versioned; this is v1.0. Contains the current phase,
-    any stored photo reference (file_id and local path as stored), and
-    provides a clear operation to reset state.
+    The schema is versioned; this is v1.1 (adds the Phase 3 interview state).
+    Contains the current phase, any stored photo reference (file_id and local
+    path as stored), the interview progress, and provides a clear operation to
+    reset state.
     """
 
     chat_id: int
@@ -154,6 +280,7 @@ class SessionState(BaseModel):
     photo_file_id: str | None = None
     photo_local_path: str | None = None
     temp_media_path: str | None = None
+    interview: InterviewState = Field(default_factory=InterviewState)
 
     model_config = {
         "extra": "ignore",
@@ -166,6 +293,7 @@ class SessionState(BaseModel):
         self.photo_file_id = None
         self.photo_local_path = None
         self.temp_media_path = None
+        self.interview = InterviewState()
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for debugging/logging without leaking bytes."""
@@ -195,14 +323,14 @@ class BouncerVerdict(BaseModel):
     @classmethod
     def validate_observed_subject(cls, v: str) -> str:
         if not isinstance(v, str) or not v.strip():
-            raise TypeError("observed_subject must be a non-empty string")
+            raise ValueError("observed_subject must be a non-empty string")
         return v.strip()
 
     @field_validator("message")
     @classmethod
     def validate_message(cls, v: str) -> str:
         if not isinstance(v, str) or not v.strip():
-            raise TypeError("message must be a non-empty string")
+            raise ValueError("message must be a non-empty string")
         return v.strip()
 
     @field_validator("reason")
@@ -212,7 +340,7 @@ class BouncerVerdict(BaseModel):
             return v
         if not isinstance(v, RejectionReason):
             # Also accept from string values? Pydantic v2 will coerce; enforce type
-            raise TypeError("reason must be a RejectionReason")
+            raise ValueError("reason must be a RejectionReason")
         return v
 
     @model_validator(mode="after")

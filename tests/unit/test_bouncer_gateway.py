@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from telegram_documentaries import bot_gateway
-from telegram_documentaries.bouncer import GeminiApiError
+from telegram_documentaries.gemini import GeminiApiError
 from telegram_documentaries.models import (
     BouncerVerdict,
     RejectionReason,

@@ -16,7 +16,8 @@ from typing import Any
 import httpx
 import pytest
 
-from telegram_documentaries.bouncer import GeminiApiError, GeminiVisionClient
+from telegram_documentaries.bouncer import GeminiVisionClient
+from telegram_documentaries.gemini import GeminiApiError
 
 PLACEHOLDER_API_KEY = "PLACEHOLDER-GEMINI-API-KEY"
 

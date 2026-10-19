@@ -23,7 +23,6 @@ import httpx
 
 from telegram_documentaries import bouncer
 from telegram_documentaries.bouncer import (
-    GeminiApiError,
     GeminiVisionClient,
     PhotoValidationError,
 )
@@ -34,6 +33,7 @@ from telegram_documentaries.config import (
     install_secret_redaction,
     load_settings,
 )
+from telegram_documentaries.gemini import GeminiApiError
 from telegram_documentaries.logging_utils import log_phase_transition
 from telegram_documentaries.models import (
     Message,

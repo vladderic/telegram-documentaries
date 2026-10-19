@@ -1,4 +1,10 @@
-from telegram_documentaries.models import Phase, SessionState
+from telegram_documentaries.models import (
+    BehaviouralProfile,
+    InterviewAnswer,
+    InterviewState,
+    Phase,
+    SessionState,
+)
 
 
 def test_initial_state_is_awaiting_photo() -> None:
@@ -35,3 +41,55 @@ def test_transition_sequence_reject_returns_to_awaiting_photo() -> None:
     state = SessionState(chat_id=123, phase=Phase.BOUNCER_CHECK, photo_file_id="fid")
     state.clear()
     assert state.phase == Phase.AWAITING_PHOTO
+
+
+class TestInterviewState:
+    def test_defaults_to_an_empty_interview(self) -> None:
+        state = SessionState(chat_id=123)
+        assert state.interview.answers == []
+        assert state.interview.pending_question is None
+        assert state.interview.profile is None
+
+    def test_derives_the_next_question_number_from_the_answers(self) -> None:
+        """Single source of truth: no stored counter that could drift."""
+        interview = InterviewState()
+        assert interview.next_question_number == 1
+
+        interview.answers.append(InterviewAnswer(question="Q1?", answer="A1"))
+        interview.answers.append(InterviewAnswer(question="Q2?", answer="A2"))
+        interview.answers.append(InterviewAnswer(question="Q3?", answer="A3"))
+        assert interview.next_question_number == 4
+
+    def test_derives_finished_from_the_stored_profile(self) -> None:
+        interview = InterviewState()
+        assert interview.is_finished is False
+
+        interview.profile = BehaviouralProfile(
+            profile="The subject hoards tea cups.", suggested_animal="Red fox"
+        )
+        assert interview.is_finished is True
+
+    def test_clear_resets_the_interview(self) -> None:
+        state = SessionState(chat_id=123, phase=Phase.INTERVIEW)
+        state.interview.answers.append(InterviewAnswer(question="Q1?", answer="A1"))
+        state.interview.pending_question = "Q2?"
+        state.interview.profile = BehaviouralProfile(
+            profile="Finished early.", suggested_animal="Red fox"
+        )
+
+        state.clear()
+
+        assert state.interview.answers == []
+        assert state.interview.pending_question is None
+        assert state.interview.profile is None
+
+    def test_sessions_do_not_share_interview_state(self) -> None:
+        """A shared mutable default would leak one user's dossier to another."""
+        first = SessionState(chat_id=1)
+        second = SessionState(chat_id=2)
+
+        first.interview.answers.append(InterviewAnswer(question="Q?", answer="A"))
+        first.interview.pending_question = "Q?"
+
+        assert second.interview.answers == []
+        assert second.interview.pending_question is None
