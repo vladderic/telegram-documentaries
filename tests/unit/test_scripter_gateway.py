@@ -672,6 +672,38 @@ class TestTheVoiceNoteClosesTheDocumentary:
         assert len(narrator.calls) == 1  # no retry
 
 
+class TestOneVoiceNotePerSession:
+    """The Phase 6 headline: a finished session never synthesises twice."""
+
+    @pytest.mark.asyncio
+    async def test_a_message_after_done_gets_the_holding_reply_and_no_second_note(
+        self, tmp_path: Any
+    ) -> None:
+        send = AsyncMock(return_value={"ok": True})
+        send_voice = AsyncMock(return_value={"ok": True})
+        narrator = FakeNarrator()
+        updates = FINISH_UPDATES + [[text_update(7, 555, "one more thing")]]
+
+        await run_updates(
+            updates,
+            interviewer=FakeInterviewer(),
+            scripter=FakeScripter(),
+            send=send,
+            send_photo=AsyncMock(return_value={"ok": True}),
+            converter=FakeConverter(),
+            media_root=str(tmp_path),
+            narrator=narrator,
+            send_voice=send_voice,
+        )
+
+        texts = sent_texts(send)
+        assert texts[-1] == bot_gateway.LATER_PHASE_REPLY
+        # One interview, one synthesis, one upload - the late message starts
+        # nothing.
+        assert send_voice.await_count == 1
+        assert len(narrator.calls) == 1
+
+
 class TestNarrate:
     """The Phase 6 stage in isolation: the voice from the delivered words."""
 
