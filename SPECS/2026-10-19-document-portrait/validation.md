@@ -48,8 +48,18 @@ scripts; live checks need real Telegram traffic against the running bot.
 
 ## Live (real Telegram traffic)
 
-- [ ] Portrait sent **as a file** → hold line → verdict → interview opens; the
-      log shows the document path and the stored file is `portrait.<ext>`.
+- [x] **The file path works** (2026-10-19 14:26): the same image reached the bot
+      as a document, not a photo —
+      `portrait_received kind=document has_photo=False has_document=True
+      mime=image/jpeg declared_bytes=592016`. The photo route for the same
+      picture had declared only 245840 bytes, so the uploads really do differ.
+      (It was then correctly rejected: `NOT_A_REAL_PHOTO`, "a cartoon drawing of
+      a smiling sun" — the vision gate judged the file's bytes.)
+- [x] The upload kind is now observable in the log at all: this was the gap that
+      made the first attempt ambiguous (a JPEG file and a compressed photo both
+      stored as `portrait.jpg`), fixed in `e9bc08d`.
+- [ ] An **accepted** file portrait → hold line → verdict → interview opens; the
+      log shows `kind=document` and the stored file is `portrait.<ext>`.
 - [ ] Interview finished → portrait generated; the log shows `converter_fuse`
       with the document's media type and a **larger** stored source than the
       compressed-photo run (`portrait_bytes` comparison recorded).
@@ -58,7 +68,9 @@ scripts; live checks need real Telegram traffic against the running bot.
 - [ ] A normal photo behaves exactly as before (regression check).
 - [ ] Quality note recorded honestly: how much did the full-resolution source
       actually help the fusion? (The model's ceiling remains; the Phase 4 prompt
-      is variant B, "same rules + realism".)
+      is variant B, "same rules + realism".) `converter_fuse portrait_bytes`
+      gives the comparison: 150646 for the compressed photo (12:19) vs the
+      document's own size for a file upload.
 - [ ] Docs updated: README (upload section, 10 MB cap), ROADMAP (Phase 4b
       entry), this file. `TECH.md` needs no edit: its session-state notes are
       phase-level, not field-level.
