@@ -29,6 +29,13 @@ class TestGeneratedImage:
         assert image.data == JPEG_BYTES
         assert image.mime_type == "image/png"
 
+    def test_accepts_base64_split_across_lines(self) -> None:
+        wrapped = "\n".join(JPEG_B64[i : i + 8] for i in range(0, len(JPEG_B64), 8))
+
+        image = GeneratedImage.from_base64("image/jpeg", wrapped)
+
+        assert image.data == JPEG_BYTES
+
     def test_normalises_the_mime_type(self) -> None:
         image = GeneratedImage.from_base64("  IMAGE/JPEG  ", JPEG_B64)
 

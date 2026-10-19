@@ -6,29 +6,38 @@ traffic.
 
 ## Automated (`scripts/hooks` must be green)
 
-- [ ] `scripts/test` — all tests pass; new tests were red before the matching
-      implementation existed (Red/Green evidence in the commit history).
-- [ ] Shared-client change: `generate(...)` behaviour unchanged (every existing
-      Bouncer/Interviewer test stays green); `generate_image(...)` sends
-      `responseModalities: ["IMAGE"]`; API key never in an error message.
-- [ ] Contract tests: `GeneratedImage` decodes base64 at the boundary, passes
-      raw bytes through, and rejects empty data, junk base64 and non-image mime
-      types.
-- [ ] Prompt tests: `build_prompt` names the bare species and the dossier, asks
-      for the same person's likeness, one subject, and no text/watermarks.
-- [ ] Client tests: a valid response yields the decoded image; a text-only
+- [x] `scripts/test` — all tests pass (231 at the phase's last green run); the
+      new tests were red first (each task group was committed only after its
+      Red run: e.g. 3 `TestGenerateImage` failures, 14 contract failures, 11
+      converter-client failures, 7 `TestSendPhoto` failures, 10 gateway
+      failures before the wiring landed).
+- [x] Shared-client change: `generate(...)` behaviour unchanged (every existing
+      Bouncer/Interviewer test stays green — 40 passed on the refactor commit);
+      `generate_image(...)` sends `responseModalities: ["IMAGE"]`; API key
+      never in an error message (`test_http_failure_is_typed_and_never_leaks_the_key`).
+- [x] Contract tests: `GeneratedImage` decodes base64 at the boundary (including
+      line-wrapped base64), passes raw bytes through, and rejects empty data,
+      junk base64 and non-image mime types (15 tests).
+- [x] Prompt tests: `build_prompt` names the bare species and the dossier, asks
+      for the same person's likeness, one subject, and no text/watermarks; the
+      species line never contains the description sentence.
+- [x] Client tests: a valid response yields the decoded image; a text-only
       response, a malformed inline part and a missing part all raise the typed
-      `GeminiApiError` instead of leaking a raw dict.
-- [ ] Telegram tests: `sendPhoto` is multipart with `chat_id`/`caption`/`photo`,
+      `GeminiApiError` instead of leaking a raw dict (`test_converter_client.py`).
+- [x] Telegram tests: `sendPhoto` is multipart with `chat_id`/`caption`/`photo`,
       is never retried, and redacts the token from errors.
-- [ ] Gateway tests: both finish routes (model FINISH, ceiling `distil`) send
+- [x] Gateway tests: both finish routes (model FINISH, ceiling `distil`) send
       reveal → hold line → one captioned photo; failure paths (Gemini, Telegram,
       missing file) send the in-character line, keep `CONVERT`, and never raise;
       the delivered bytes are the stored portrait.
-- [ ] Shutdown test: the Converter client is closed on both SIGINT and SIGTERM
-      (no leaked connection pool).
-- [ ] ruff, ruff-format, mypy (strict), gitleaks all pass (`scripts/hooks`).
-- [ ] `.env` and `.tmp/` remain untracked (`git check-ignore`).
+- [x] Shutdown test: the Converter client is built once and closed in
+      `run_bot`'s `finally`, which both SIGINT and SIGTERM route into
+      (`test_the_converter_pool_is_closed_on_shutdown[SIGINT|SIGTERM]` drives
+      the shutdown event; the handlers themselves are registered for both
+      signals).
+- [x] ruff, ruff-format, mypy (strict), gitleaks all pass (`scripts/hooks`).
+- [x] `.env` and `.tmp/` remain untracked (`git check-ignore` → `.gitignore:5`
+      and `:24`).
 
 ## Live (running bot, real Telegram client)
 

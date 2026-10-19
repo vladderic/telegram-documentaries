@@ -303,7 +303,10 @@ class GeneratedImage(BaseModel):
     def decode_data(cls, v: Any) -> bytes:
         if isinstance(v, str):
             try:
-                v = base64.b64decode(v, validate=True)
+                # Whitespace never carries meaning in base64; some encoders wrap
+                # long payloads, and a hard failure there would look like a
+                # missing image rather than a formatting quirk.
+                v = base64.b64decode("".join(v.split()), validate=True)
             except (binascii.Error, ValueError):
                 raise ValueError("data must be valid base64") from None
         if not isinstance(v, bytes) or not v:

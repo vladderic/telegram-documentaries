@@ -31,6 +31,12 @@ Multimodal hybrid portrait: original photo + dossier → Gemini Flash Image →
 portrait sent directly to Telegram.
 - **Acceptance:** user receives an image in Telegram; failures degrade
   gracefully with a logged error, never a crash.
+- **Implementation:** `converter.py` (`CONVERTER_MODEL = "gemini-3.1-flash-image"`,
+  `build_prompt`, `ConverterClient.fuse`), the typed `GeneratedImage` contract
+  (base64 decoded at the boundary), `TelegramClient.send_photo` (multipart,
+  never retried), and the delivery step in `_finish_interview` — the single
+  finish path, so both the model-FINISH and ceiling-`distil` routes reach the
+  Converter. The client is built once in `run_bot` and closed on shutdown.
 - **Serves:** happy path.
 
 ## Phase 5 — Scripter
@@ -80,7 +86,7 @@ OOM kill, box restart) never leaves it silently offline.
 | 1 — Repository & gateway | Complete |
 | 2 — Bouncer | Complete |
 | 3 — Interviewer | Complete |
-| 4 — Converter | Not started |
+| 4 — Converter | Complete (live check pending) |
 | 5 — Scripter | Not started |
 | 6 — Narrator | Not started |
 | 7 — Resilience | Not started |
