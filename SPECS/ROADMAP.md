@@ -57,6 +57,17 @@ One-paragraph (~60–90 word) dramatic British-documentary narration built from
 the dossier.
 - **Acceptance:** script generated from dossier, length-bounded, in the
   documentary voice.
+- **Implementation:** `scripter.py` (`SCRIPTER_MODEL = "gemini-3.1-flash-lite"`,
+  `MAX_WORDS = 90`, `SCRIPTER_PERSONA`/`SCRIPT_RULES`, `build_prompt`,
+  `SCRIPT_SCHEMA`, `ScripterClient.write_script`) and the typed `Script` contract
+  (whitespace normalised to one paragraph). The persona and rules go to Gemini as
+  a `systemInstruction` — the first stage in this repo to use that field;
+  `GeminiClient.generate` only sends it when one is given. The narration is sent
+  as plain text (no parse mode) immediately after the portrait by `_write_script`,
+  on the same single finish path, and kept on `SessionState.script_text` for
+  Phase 6. The two stages are independent: a jammed darkroom still narrates, a
+  lost script still leaves the portrait standing. Over-length output is sent as
+  written with a `scripter_over_word_limit` warning.
 - **Serves:** happy path.
 
 ## Phase 6 — Narrator
@@ -100,7 +111,7 @@ OOM kill, box restart) never leaves it silently offline.
 | 2 — Bouncer | Complete |
 | 3 — Interviewer | Complete |
 | 4 — Converter | Complete |
-| 5 — Scripter | Not started |
+| 5 — Scripter | Implementation complete — live validation pending |
 | 6 — Narrator | Not started |
 | 7 — Resilience | Not started |
 | 8 — Deployment (zero-cost) | Not started |
