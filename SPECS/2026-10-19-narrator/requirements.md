@@ -48,6 +48,14 @@ These were probed directly, because the API shape decides the whole design:
    system `ffmpeg`). Telegram plays MP3 voice notes.
 3. **Voice: `Charon`** — the deep, measured prebuilt voice closest to a
    documentary narrator. No injected style text (see finding 5).
+   - **Accepted limitation (live, user decision):** the user asked for a *male
+     British* narrator, but the Gemini TTS voice catalogue offers no British
+     voices. A live query of `GET /v1beta/voices` returned 50 prebuilt voices —
+     29 Modern Standard Arabic, 15 Egyptian Arabic, 6 General American — with
+     **no British accent** and **no entry for the classic 30 Gemini names**
+     (Charon, Puck, Orus, …) beyond the four General-American males surfaced.
+     The user chose to keep Charon for now and revisit the voice later rather
+     than switch TTS provider (which would change TECH.md's pinned model).
 4. **Delivery: text first, then the voice note.** The Phase 5 narration text
    stays exactly where it is; the voice note follows it. A TTS failure therefore
    never costs the user the narration they can read.
