@@ -96,6 +96,24 @@ traffic.
   name. Regression tests cover the non-empty contract for all three fields,
   the schema descriptions, and the ceiling path that rebuilds no typed
   object (`test_seven_answers_force_distil_instead_of_next_step`).
+- **Amended in Phase 5 (user request): the interview now covers the material the
+  narration is built from.** The live Phase 5 run produced a bland narration
+  ("a paragraph describing normal animal behaviour"), and the root cause was the
+  dossier, not the Scripter: with short everyday answers the interview had never
+  asked about the nightly routine or food, and `PROFILE_RULES` asked for "rich
+  human personality", which invites abstractions (*"enjoys snacking while
+  watching films"*) instead of quotable specifics (*"dry cereal, eaten standing
+  up, in the dark"*). The question rules now require three areas to be covered
+  before finishing — the nightly routine / how they get to sleep, what and when
+  they eat or snack, and one repeated odd habit or ritual — finishing is gated on
+  that coverage, and the profile field (schema description + prose rule) demands
+  concrete, quotable behaviour. Regression tests:
+  `test_prompt_demands_the_material_that_makes_the_narration_funny`,
+  `test_finish_is_gated_on_the_coverage_not_only_the_count`, and the profile
+  assertions in `test_returns_a_typed_profile_and_animal`. Note the trade-off,
+  accepted with the user: the questions are now noticeably more systematic and
+  in-character florid, and they can hint at the material ("the secret item you
+  scavenge from the pantry").
 - A leading-slash message mid-interview is treated as an ordinary answer (full
   command handling is Phase 7).
 - Restarting the bot clears in-memory sessions (per MISSION, no persistence).
