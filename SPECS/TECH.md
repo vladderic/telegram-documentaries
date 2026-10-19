@@ -18,7 +18,11 @@ Technical contract for the project. Every agent and feature spec defers to this.
   - **Scripter** — Gemini 3.1 Flash Lite: one-paragraph (~60–90 word) dramatic
     British-documentary narration.
   - **Narrator** — *not an agent*: Gemini TTS (`gemini-3.1-flash-tts-preview`),
-    rendered to a Telegram-compatible audio format (OGG/MP3).
+    rendered to a Telegram-compatible audio format (OGG/MP3). The model returns
+    headerless 16-bit PCM only, so the voice note is encoded **MP3** locally
+    with `lameenc` (pure pip wheel, no system `ffmpeg`); voice `Charon` (the
+    Gemini catalogue has no British voices — see
+    `SPECS/2026-10-19-narrator/requirements.md`).
 - **Secrets:** `.env` — `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`. Gitignored; never
   committed.
 

@@ -93,6 +93,19 @@ the dossier.
 TTS synthesis via Gemini TTS, rendered to Telegram-compatible audio (OGG/MP3),
 delivered as a voice note.
 - **Acceptance:** user receives a playable voice note matching the script.
+- **Implementation:** `narrator.py` (`NARRATOR_MODEL =
+  "gemini-3.1-flash-tts-preview"`, `DEFAULT_VOICE = "Charon"`, `encode_mp3` —
+  PCM → MP3 via `lameenc`, no system `ffmpeg`), the typed `VoiceNote` contract
+  (non-empty MP3 bytes + duration) and the PCM `mimeType` parser.
+  `GeminiClient.generate_audio` posts the TTS request and validates the live
+  camelCase inline-audio part into typed models at the boundary.
+  `NarratorClient.speak` sends the script **verbatim** (a style prefix is read
+  aloud — live finding; no `systemInstruction`), and the encode step's raw
+  `ValueError`/`RuntimeError` is re-raised typed so it cannot escape the
+  gateway. `TelegramClient.send_voice` uploads the MP3 (multipart, never
+  retried); `_narrate` claims `NARRATE` before the TTS call, keeps the delivered
+  text standing on any failure, and always resolves to `DONE` (one voice note
+  per session via `SessionState.voice_note_sent`, v1.3).
 - **Serves:** happy path (end-to-end).
 
 ## Phase 7 — Resilience
@@ -131,6 +144,6 @@ OOM kill, box restart) never leaves it silently offline.
 | 3 — Interviewer | Complete |
 | 4 — Converter | Complete |
 | 5 — Scripter | Complete |
-| 6 — Narrator | Not started |
+| 6 — Narrator | Implementation complete — live validation pending |
 | 7 — Resilience | Not started |
 | 8 — Deployment (zero-cost) | Not started |
