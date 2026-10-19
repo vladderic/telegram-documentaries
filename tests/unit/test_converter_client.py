@@ -68,20 +68,21 @@ def request_body(seen: list[httpx.Request]) -> dict[str, Any]:
 
 
 class TestBuildPrompt:
-    def test_names_the_species_and_keeps_the_face_intact(self) -> None:
+    def test_names_the_species_and_protects_the_likeness(self) -> None:
         """The framing chosen in the 2026-10-19 live variant experiment."""
         prompt = build_prompt(PROFILE).lower()
 
         assert "red fox" in prompt
-        assert "the same facial features" in prompt
-        assert "head, face and expression intact" in prompt
+        assert "the same person" in prompt
+        assert "the same eyes, nose, mouth" in prompt
 
-    def test_asks_for_one_professional_photograph(self) -> None:
+    def test_asks_for_one_real_photograph(self) -> None:
         prompt = build_prompt(PROFILE).lower()
 
-        assert "85mm" in prompt
-        assert "seamless anatomy" in prompt
-        assert "no composite" in prompt
+        assert "single real photograph" in prompt
+        assert "one subject" in prompt
+        assert "no visible compositing" in prompt
+        assert "cut-out edges" in prompt
 
     def test_carries_the_dossier_and_the_crews_brief(self) -> None:
         prompt = build_prompt(PROFILE)

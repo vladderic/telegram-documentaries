@@ -37,23 +37,21 @@ CONVERTER_PERSONA = (
     "wildlife documentary."
 )
 
-#: Wording chosen in a three-variant live experiment (2026-10-19): the "current
-#: rules" and "likeness first" framings produced crude composites, so the rules
-#: now frame the work as one real photograph with the person's face intact and
-#: the animal's traits added around it.
+#: Wording chosen in a three-variant live experiment (2026-10-19): the original
+#: rules fused the face and the animal but read as a crude composite, so the
+#: same rules now demand one real photograph - the person's own features kept,
+#: the animal's traits fused in, and no visible compositing.
 CONVERTER_RULES = (
-    "Shoot a single professional wildlife portrait photograph on an 85mm "
-    "portrait lens.\n"
-    "- One believable hybrid creature: the person in the reference photo, with "
-    "their head, face and expression intact - the same facial features, "
-    "hairstyle, glasses and skin.\n"
-    "- Add the species' ears, fur texture, eye colour and colouring around the "
-    "face and shoulders, and borrow its habits for the pose and setting.\n"
-    "- Natural-history still: soft window light, shallow depth of field, fine "
-    "skin and fur detail, seamless anatomy.\n"
-    "- Exactly one subject, centred, looking towards the camera.\n"
-    "- No text, no caption, no watermark, no border or frame, no collage, no "
-    "composite artifacts.\n"
+    "Shoot a single real photograph: a hybrid human-animal portrait.\n"
+    "- The face must stay recognisably the same person - the same eyes, nose, "
+    "mouth, jawline, hairstyle and glasses - and the head stays human.\n"
+    "- Fuse that likeness with the species named below: its fur texture, ears, "
+    "muzzle suggestion, eye colour and colouring blended believably into the "
+    "face and shoulders.\n"
+    "- One subject, natural-history film look, shallow depth of field, soft "
+    "natural light, fine skin and fur detail.\n"
+    "- No visible compositing, no cut-out edges, no collage, no text, no "
+    "caption, no watermark, no border or frame.\n"
     "- Return the image itself and nothing else."
 )
 
