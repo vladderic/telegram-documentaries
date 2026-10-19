@@ -47,6 +47,12 @@ traffic.
 
 ### Live observations / accepted limitations
 
+- **Fixed during live validation:** the first build interviewed the user as if
+  they were an animal ("packs", "prey", "watering holes"), because the persona
+  prompt framed the crew as studying "a fascinating new specimen". The persona
+  now pins the subject as a human being and forbids animal-life questions; the
+  animal comparison is drawn later from the transcript (regression test:
+  `test_prompt_interviews_the_person_not_an_animal`).
 - A leading-slash message mid-interview is treated as an ordinary answer (full
   command handling is Phase 7).
 - Restarting the bot clears in-memory sessions (per MISSION, no persistence).

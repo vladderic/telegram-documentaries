@@ -160,6 +160,34 @@ class TestNextQuestion:
         finally:
             await client.close()
 
+    @pytest.mark.asyncio
+    async def test_prompt_interviews_the_person_not_an_animal(self) -> None:
+        """The subject is a human being: the wildlife lens is tone, not topic.
+
+        Live check found the model asking about packs, prey and watering holes
+        - it had read the documentary framing as "interview wildlife". The
+        prompt must pin the subject down.
+        """
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json=gemini_response({"question": "Q1?"}))
+
+        client = make_client(handler)
+        try:
+            await client.next_question(interview_with(), answer=None)
+        finally:
+            await client.close()
+
+        lowered = prompt_text(request_body(seen)).lower()
+        assert "human being" in lowered
+        assert "never ask" in lowered
+        assert "animal life" in lowered
+        assert "packs" in lowered
+        assert "prey" in lowered
+        assert "investigative" in lowered
+
 
 class TestNextStep:
     @pytest.mark.asyncio
@@ -286,6 +314,8 @@ class TestDistil:
         assert "third person" in lowered
         assert "animal" in lowered
         assert "only" in lowered and "answers" in lowered
+        # The dossier describes a human personality; the animal is the metaphor.
+        assert "human personality" in lowered
 
     @pytest.mark.asyncio
     async def test_empty_profile_from_the_model_is_a_typed_failure(self) -> None:

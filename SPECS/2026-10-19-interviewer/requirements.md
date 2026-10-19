@@ -80,6 +80,10 @@ Threshold enforcement lives in the gateway's state machine, not in the model.
 
 - Tone throughout: investigative, playful, slightly eccentric — a documentary
   crew that treats a job interview like a nature expedition.
+- The subject is a **human being**: questions probe human life (routines,
+  habits, quirks, people, feelings). The wildlife framing is the crew's tone
+  and note-taking style only — the animal is drawn from the transcript
+  afterwards, never asked about (live-validation finding, see validation.md).
 - Question rules: exactly one question per message; at most two sentences; no
   multi-part or "and also…" questions; never repeat a question already asked;
   probe behaviour and habits (what the animal choice will be built from).
