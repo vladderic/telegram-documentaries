@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Run every repository check: ruff lint, ruff format, mypy, pytest, gitleaks.
+# Ground truth for the repo's gates (TECH.md); CI should run this too.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec pre-commit run --all-files "$@"
