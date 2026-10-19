@@ -1,9 +1,9 @@
-"""Phase 1-3 Telegram gateway (entry point).
+"""Telegram gateway (entry point) for every stage built so far.
 
 Responsibilities:
 - load secrets from ``.env`` (never hardcode, never log them),
 - long-poll Telegram (``getUpdates``) and route each update to the current
-  pipeline stage (Phase 2: the Bouncer vision gate; Phase 3: the Interviewer),
+  pipeline stage (Bouncer vision gate, Interviewer, Converter, Scripter),
 - fail loudly with a clear log when configuration is missing,
 - shut down gracefully on Ctrl+C / SIGTERM, even mid-poll.
 
@@ -55,6 +55,7 @@ from telegram_documentaries.models import (
     Update,
     UpdateResult,
 )
+from telegram_documentaries.scripter import ScripterClient
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,9 @@ PHOTO_NUDGE = (
     "A pleasure to hear from you - but I judge faces, not words. "
     "Send me a photograph and we will get you on camera."
 )
-#: Input that arrives before the stage behind us exists (Converter onwards).
+#: Input that arrives once the pipeline has moved past the stage that would
+#: reply to it: the crew has no further dialogue yet (Phase 6 adds the voice
+#: note), so the session simply holds.
 LATER_PHASE_REPLY = (
     "One moment - the crew is still setting up this scene. Give me a beat to catch up."
 )
@@ -122,13 +125,21 @@ PORTRAIT_HOLD_MSG = (
     "A hybrid needs a little time to settle."
 )
 #: The Converter failed (model, transport or unreadable portrait): degrade in
-#: character. The session stays in CONVERT, so no new run can start.
+#: character. The session moves on to the script stage regardless, so a jammed
+#: darkroom never silences the narrator (Phase 5 decision).
 PORTRAIT_FAILURE_MSG = (
     "Curses - the darkroom door jammed shut mid-develop and your portrait "
     "never came out. That frame is lost to the archive."
 )
 #: The hybrid portrait's caption: it names the species the crew cast them as.
 PORTRAIT_CAPTION_TEMPLATE = "Suggested casting: {animal}"
+#: The Scripter failed (model, transport or empty narration): degrade in
+#: character. The stage is claimed before the call, so no second narration can
+#: start; a delivered portrait still stands.
+SCRIPT_FAILURE_MSG = (
+    "The narrator has lost his page - the wind took it clean off the lectern. "
+    "No words this time, but your portrait still stands."
+)
 
 #: Safety margin for the answer guard. Telegram timestamps carry a 1s
 #: resolution and the bot's clock need not match the server's, so a message is
@@ -570,11 +581,11 @@ async def _deliver_portrait(
 ) -> None:
     """Hold, generate the hybrid portrait and upload it; never raises.
 
-    The final stage of the happy path: the stored reference photo plus the
+    The reveal stage of the happy path: the stored reference photo plus the
     dossier go to the Converter, and one captioned image comes back to the
     chat. Every failure (unreadable portrait, model failure, upload failure)
-    degrades in character instead of raising, so the polling loop survives and
-    the session simply stays in ``CONVERT``.
+    degrades in character instead of raising, so the polling loop survives -
+    and the script stage that follows still speaks either way (Phase 5).
 
     Args:
         client: Telegram client for the hold line and the upload.
@@ -622,17 +633,66 @@ async def _deliver_portrait(
     )
 
 
+async def _write_script(
+    client: TelegramClient,
+    scripter: ScripterClient,
+    session: SessionState,
+    profile: BehaviouralProfile,
+) -> None:
+    """Write the narration and send it as plain text; never raises.
+
+    The last stage of the happy path (Phase 5): the dossier becomes one
+    paragraph of documentary narration. It is sent without any formatting
+    requested, so the words arrive exactly as written - which is what Phase 6
+    synthesises into audio. The stage is claimed *before* the model call, so a
+    failure cannot leave the session in a phase that would let a second
+    narration start.
+
+    Args:
+        client: Telegram client for the narration message.
+        scripter: Scripter client (the text model call).
+        session: The finished session; moved to ``SCRIPT`` and given the text.
+        profile: The dossier the narration is written from.
+    """
+    chat_id = session.chat_id
+    if session.phase is not Phase.SCRIPT:
+        log_phase_transition(logger, chat_id, session.phase, Phase.SCRIPT)
+        session.phase = Phase.SCRIPT
+    try:
+        script = await scripter.write_script(profile)
+    except (GeminiApiError, TelegramApiError):
+        logger.exception("scripter failed chat_id=%s", chat_id)
+        await _send(client, chat_id, SCRIPT_FAILURE_MSG)
+        return
+
+    if not await _send(client, chat_id, script.text):
+        return
+    # Only a narration that reached the chat becomes Phase 6's input: the audio
+    # must never say something the user never read.
+    session.script_text = script.text
+    logger.info(
+        "script_delivered chat_id=%s words=%s chars=%s",
+        chat_id,
+        len(script.text.split()),
+        len(script.text),
+    )
+
+
 async def _finish_interview(
     client: TelegramClient,
     converter: ConverterClient,
+    scripter: ScripterClient,
     session: SessionState,
     final_profile: BehaviouralProfile,
 ) -> None:
-    """Store the dossier, move to CONVERT, reveal the case file, convert.
+    """Store the dossier, move to CONVERT, reveal the case file, convert, narrate.
 
     The single finish path for both routes into it (the model chose FINISH, or
     the ceiling forced it), so the reveal template is formatted in one place
-    and no finish route can skip the Converter.
+    and no finish route can skip the later stages.
+
+    The portrait and the narration are **independent**: whichever one fails,
+    the other still reaches the user.
     """
     chat_id = session.chat_id
     session.interview.profile = final_profile
@@ -654,11 +714,13 @@ async def _finish_interview(
         ),
     )
     await _deliver_portrait(client, converter, session, final_profile)
+    await _write_script(client, scripter, session, final_profile)
 
 
 async def _handle_answer(
     client: TelegramClient,
     converter: ConverterClient,
+    scripter: ScripterClient,
     interviewer: InterviewerClient,
     session: SessionState,
     answer: str,
@@ -697,7 +759,7 @@ async def _handle_answer(
             return
         interview.answers.append(InterviewAnswer(question=pending, answer=answer))
         interview.pending_question = None
-        await _finish_interview(client, converter, session, distilled)
+        await _finish_interview(client, converter, scripter, session, distilled)
         return
 
     try:
@@ -725,7 +787,7 @@ async def _handle_answer(
             logger.error("interview_finish_without_profile chat_id=%s", chat_id)
             await _send(client, chat_id, INTERVIEW_RETRY_MSG)
             return
-        await _finish_interview(client, converter, session, final_profile)
+        await _finish_interview(client, converter, scripter, session, final_profile)
         return
 
     question = step.question
@@ -741,6 +803,7 @@ async def _handle_answer(
 async def _handle_interview(
     client: TelegramClient,
     converter: ConverterClient,
+    scripter: ScripterClient,
     interviewer: InterviewerClient,
     session: SessionState,
     message: Message,
@@ -799,7 +862,7 @@ async def _handle_interview(
         await _send(client, chat_id, f"{INTERVIEW_NUDGE}\n\n{pending}")
         return
 
-    await _handle_answer(client, converter, interviewer, session, answer)
+    await _handle_answer(client, converter, scripter, interviewer, session, answer)
 
 
 async def _handle_portrait(
@@ -939,6 +1002,7 @@ async def _dispatch_update(
     client: TelegramClient,
     vision: GeminiVisionClient,
     converter: ConverterClient,
+    scripter: ScripterClient,
     interviewer: InterviewerClient,
     sessions: dict[int, SessionState],
     media_root: str | Path,
@@ -963,7 +1027,7 @@ async def _dispatch_update(
             # Phase 3: the Interviewer owns this stage. A photo (or any other
             # non-text input) never advances the interview - it only nudges.
             await _handle_interview(
-                client, converter, interviewer, session, update.message
+                client, converter, scripter, interviewer, session, update.message
             )
             return
 
@@ -1047,8 +1111,9 @@ async def run_bot(
     vision = GeminiVisionClient(api_key=settings.gemini_api_key)
     interviewer = InterviewerClient(api_key=settings.gemini_api_key)
     converter = ConverterClient(api_key=settings.gemini_api_key)
+    scripter = ScripterClient(api_key=settings.gemini_api_key)
     sessions: dict[int, SessionState] = {}
-    logger.info("Starting Telegram gateway (Phase 4 - Converter)")
+    logger.info("Starting Telegram gateway (Phase 5 - Scripter)")
 
     try:
         iterations = 0
@@ -1066,7 +1131,14 @@ async def run_bot(
                 break
             for update in updates:
                 await _dispatch_update(
-                    client, vision, converter, interviewer, sessions, media_root, update
+                    client,
+                    vision,
+                    converter,
+                    scripter,
+                    interviewer,
+                    sessions,
+                    media_root,
+                    update,
                 )
             # Brief pause so a hot update feed cannot spin the loop.
             await asyncio.sleep(0.01)
@@ -1075,6 +1147,7 @@ async def run_bot(
         await vision.close()
         await interviewer.close()
         await converter.close()
+        await scripter.close()
         logger.info("Telegram gateway stopped cleanly")
 
 

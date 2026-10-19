@@ -23,6 +23,7 @@ from telegram_documentaries.models import (
     GeneratedImage,
     InterviewAction,
     InterviewStep,
+    Script,
     Update,
 )
 
@@ -45,6 +46,10 @@ DISTILLED_PROFILE = BehaviouralProfile(
     animal_description="A lone hunter of the small hours.",
 )
 IMAGE = GeneratedImage(mime_type="image/jpeg", data=b"HYBRID-PORTRAIT-BYTES")
+#: The narration the Scripter fake returns, so the flow past the Converter can
+#: be asserted here too (Phase 5 always runs after the portrait, success or
+#: failure).
+NARRATION = "Our subject rises at dusk and patrols the kitchen with intent."
 #: The bytes the mocked download hands back, so the Bouncer stores - and the
 #: Converter must receive - exactly these.
 PORTRAIT_BYTES = b"STORED-PORTRAIT-BYTES"
@@ -155,6 +160,19 @@ class FakeConverter:
         self.closed = True
 
 
+class FakeScripter:
+    """Minimal stand-in for :class:`ScripterClient` (one canned narration)."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def write_script(self, profile: BehaviouralProfile) -> Script:
+        return Script(text=NARRATION)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class FakeInterviewer:
     """Scripted stand-in for :class:`InterviewerClient` (no recording needed)."""
 
@@ -216,8 +234,9 @@ async def run_updates(
     media_root: str,
     vision: AsyncMock | None = None,
 ) -> None:
-    """Run ``run_bot`` with Telegram, the Bouncer, the Interviewer and the
-    Converter mocked. Must be awaited inside the patch context."""
+    """Run ``run_bot`` with Telegram, the Bouncer, the Interviewer, the
+    Converter and the Scripter mocked. Must be awaited inside the patch
+    context."""
     mock_client = AsyncMock()
     mock_client.get_updates = AsyncMock(side_effect=updates)
     mock_client.send_message = send
@@ -236,6 +255,7 @@ async def run_updates(
         patch.object(bot_gateway, "GeminiVisionClient", return_value=vision),
         patch.object(bot_gateway, "InterviewerClient", return_value=interviewer),
         patch.object(bot_gateway, "ConverterClient", return_value=converter),
+        patch.object(bot_gateway, "ScripterClient", return_value=FakeScripter()),
         patch.object(bot_gateway, "_now", return_value=DEFAULT_NOW),
     ):
         await bot_gateway.run_bot(
@@ -306,12 +326,14 @@ class TestFinishRoutesReachTheConverter:
         )
 
         texts = sent_texts(send)
-        assert texts[-2] == bot_gateway.PROFILE_REVEAL_TEMPLATE.format(
+        assert texts[-3] == bot_gateway.PROFILE_REVEAL_TEMPLATE.format(
             profile=FINISH_PROFILE.profile,
             animal=FINISH_PROFILE.suggested_animal,
             animal_description=FINISH_PROFILE.animal_description,
         )
-        assert texts[-1] == bot_gateway.PORTRAIT_HOLD_MSG
+        assert texts[-2] == bot_gateway.PORTRAIT_HOLD_MSG
+        # And the narrator still has the last word (Phase 5).
+        assert texts[-1] == NARRATION
 
         assert send_photo.await_count == 1
         photo_call = send_photo.await_args_list[0].kwargs
@@ -357,7 +379,8 @@ class TestFinishRoutesReachTheConverter:
             media_root=str(tmp_path),
         )
 
-        assert sent_texts(send)[-1] == bot_gateway.PORTRAIT_HOLD_MSG
+        assert sent_texts(send)[-2] == bot_gateway.PORTRAIT_HOLD_MSG
+        assert sent_texts(send)[-1] == NARRATION
         assert send_photo.await_count == 1
         assert converter.calls[0].profile == DISTILLED_PROFILE
         assert "Red fox" in send_photo.await_args_list[0].kwargs["caption"]
@@ -573,7 +596,7 @@ class TestDocumentPortrait:
 
 class TestPortraitFailurePaths:
     @pytest.mark.asyncio
-    async def test_converter_failure_degrades_and_stays_in_convert(
+    async def test_converter_failure_still_narrates_and_holds_afterwards(
         self, tmp_path: Any
     ) -> None:
         send = new_send()
@@ -591,8 +614,11 @@ class TestPortraitFailurePaths:
         )
 
         texts = sent_texts(send)
-        assert texts[-2] == bot_gateway.PORTRAIT_FAILURE_MSG
-        # Still in CONVERT: the follow-up gets the holding reply, not a new run.
+        # The darkroom jammed - but a jammed darkroom never silences the
+        # narrator (Phase 5 decision), so the script still goes out.
+        assert texts[-3] == bot_gateway.PORTRAIT_FAILURE_MSG
+        assert texts[-2] == NARRATION
+        # Past SCRIPT: the follow-up gets the holding reply, not a new run.
         assert texts[-1] == bot_gateway.LATER_PHASE_REPLY
         assert send_photo.await_count == 0
         assert len(converter.calls) == 1
@@ -615,7 +641,8 @@ class TestPortraitFailurePaths:
             media_root=str(tmp_path),
         )
 
-        assert sent_texts(send)[-1] == bot_gateway.PORTRAIT_FAILURE_MSG
+        assert sent_texts(send)[-2] == bot_gateway.PORTRAIT_FAILURE_MSG
+        assert sent_texts(send)[-1] == NARRATION
         assert send_photo.await_count == 1
 
     @pytest.mark.asyncio
@@ -637,7 +664,8 @@ class TestPortraitFailurePaths:
                 media_root=str(tmp_path),
             )
 
-        assert sent_texts(send)[-1] == bot_gateway.PORTRAIT_FAILURE_MSG
+        assert sent_texts(send)[-2] == bot_gateway.PORTRAIT_FAILURE_MSG
+        assert sent_texts(send)[-1] == NARRATION
         assert converter.calls == []
         assert send_photo.await_count == 0
 
