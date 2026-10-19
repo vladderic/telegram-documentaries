@@ -215,6 +215,7 @@ def portrait_source(message: Message) -> PortraitSource | None:
             file_id=largest.file_id,
             mime_type=PHOTO_MIME_TYPE,
             file_size=largest.file_size,
+            kind="photo",
         )
     document = message.document
     if document is None or document.mime_type is None:
@@ -225,6 +226,7 @@ def portrait_source(message: Message) -> PortraitSource | None:
         file_id=document.file_id,
         mime_type=document.mime_type,
         file_size=document.file_size,
+        kind="document",
     )
 
 

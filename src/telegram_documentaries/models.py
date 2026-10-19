@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AliasChoices,
@@ -104,6 +104,9 @@ class PortraitSource(BaseModel):
     file_id: str
     mime_type: str
     file_size: int | None = None
+    #: How it was uploaded: a Telegram photo (compressed) or a file
+    #: (original bytes). Logged so live runs are diagnosable.
+    kind: Literal["photo", "document"]
 
 
 class Message(BaseModel):

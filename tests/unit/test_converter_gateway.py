@@ -389,6 +389,35 @@ class TestDocumentPortrait:
     """Phase 4b: a file portrait goes through the exact same door as a photo."""
 
     @pytest.mark.asyncio
+    async def test_the_log_says_which_kind_of_upload_arrived(
+        self, tmp_path: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Live validation reads the log: the kind must be there to read."""
+        vision = AsyncMock()
+        vision.check_photo = AsyncMock(return_value=ACCEPT_VERDICT)
+        vision.close = AsyncMock()
+
+        with caplog.at_level("INFO"):
+            await run_updates(
+                [[document_update(1, 555, mime_type="image/png")]],
+                interviewer=model_finish_script(),
+                converter=FakeConverter(),
+                send=new_send(),
+                send_photo=new_send_photo(),
+                media_root=str(tmp_path),
+                vision=vision,
+            )
+
+        received = [
+            r.getMessage()
+            for r in caplog.records
+            if "portrait_received" in r.getMessage()
+        ]
+        assert len(received) == 1
+        assert "kind=document" in received[0]
+        assert "mime=image/png" in received[0]
+
+    @pytest.mark.asyncio
     async def test_a_file_portrait_is_accepted_stored_and_passed_on_truthfully(
         self, tmp_path: Any
     ) -> None:

@@ -826,6 +826,15 @@ async def _handle_portrait(
         await client.send_message(chat_id=chat_id, text=LATER_PHASE_REPLY)
         return
 
+    # Which upload kind arrived decides the source resolution, so it belongs in
+    # the log: live validation reads it back (Phase 4b).
+    logger.info(
+        "portrait_received chat_id=%s kind=%s mime=%s declared_bytes=%s",
+        chat_id,
+        portrait.kind,
+        portrait.mime_type,
+        portrait.file_size,
+    )
     log_phase_transition(logger, chat_id, session.phase, Phase.BOUNCER_CHECK)
     session.phase = Phase.BOUNCER_CHECK
     # Speak up immediately: the download takes seconds and the user must never

@@ -7,6 +7,7 @@ download failures reuse the typed Telegram errors from the gateway.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 import pytest
 
@@ -89,8 +90,11 @@ class TestFetchPortrait:
         file_id: str = "p2-large",
         mime_type: str = "image/png",
         file_size: int | None = None,
+        kind: Literal["photo", "document"] = "photo",
     ) -> PortraitSource:
-        return PortraitSource(file_id=file_id, mime_type=mime_type, file_size=file_size)
+        return PortraitSource(
+            file_id=file_id, mime_type=mime_type, file_size=file_size, kind=kind
+        )
 
     @pytest.mark.asyncio
     async def test_downloads_the_chosen_portrait(self) -> None:
@@ -173,6 +177,7 @@ class TestPortraitSource:
         assert source is not None
         assert source.file_id == "p2-large"
         assert source.mime_type == "image/jpeg"
+        assert source.kind == "photo"
 
     def test_image_document_yields_a_source_with_its_own_metadata(self) -> None:
         source = bouncer.portrait_source(
@@ -191,6 +196,7 @@ class TestPortraitSource:
         assert source.file_id == "doc-1"
         assert source.mime_type == "image/png"
         assert source.file_size == 2_048_000
+        assert source.kind == "document"
 
     def test_photo_wins_when_a_message_carries_both(self) -> None:
         source = bouncer.portrait_source(
