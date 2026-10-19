@@ -54,14 +54,34 @@ at-wrong-stage guards across all phases, API-timeout fallbacks.
   input.
 - **Serves:** reset + out-of-order success criteria.
 
+## Phase 8 — Deployment (zero-cost only)
+Run the bot as a supervised, always-on service so an unexpected death (crash,
+OOM kill, box restart) never leaves it silently offline.
+- **Acceptance:** on one zero-cost target the bot runs as a supervised service
+  and killing its process brings it back within seconds; restarting the host
+  brings the bot back with it; secrets come from the environment, never from the
+  image or the repo; `README.md` documents how to deploy it and how to check it
+  is alive; the runbook is verified end-to-end on that target.
+- **Constraint (user decision):** **no paid hosting.** Free targets only — a
+  machine the user already owns, or a free-tier VM (Oracle Cloud Always Free /
+  GCP `e2-micro`; a card may be required for identity verification but is never
+  charged). Paid platforms are out of scope: the former free worker tiers
+  (Fly.io / Railway / Render) no longer keep a long-polling worker online for
+  free, and Render's free web services sleep after ~15 minutes.
+- **Note (user decision):** session state stays **in-memory** (per MISSION, no
+  database). A restart mid-interview means the user sends a photo again — this
+  is accepted, not a bug to fix in this phase.
+- **Serves:** assessment availability — the bot is up when it is needed.
+
 ## Status
 
 | Phase | Status |
 |-------|--------|
 | 1 — Repository & gateway | Complete |
 | 2 — Bouncer | Complete |
-| 3 — Interviewer | Not started |
+| 3 — Interviewer | In progress |
 | 4 — Converter | Not started |
 | 5 — Scripter | Not started |
 | 6 — Narrator | Not started |
 | 7 — Resilience | Not started |
+| 8 — Deployment (zero-cost) | Not started |
