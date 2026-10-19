@@ -57,6 +57,7 @@ class TestInterviewStep:
         assert step.question == "How do you greet a stranger?"
         assert step.profile is None
         assert step.suggested_animal is None
+        assert step.animal_description is None
 
     def test_parses_a_finish_step(self) -> None:
         step = InterviewStep.model_validate(
@@ -64,11 +65,13 @@ class TestInterviewStep:
                 "action": "FINISH",
                 "profile": "The subject is a nocturnal opportunist.",
                 "suggested_animal": "Red fox",
+                "animal_description": "A lone hunter who trusts only the dark.",
             }
         )
         assert step.action is InterviewAction.FINISH
         assert step.question is None
         assert step.suggested_animal == "Red fox"
+        assert step.animal_description == "A lone hunter who trusts only the dark."
 
     @pytest.mark.parametrize(
         "payload",
@@ -83,6 +86,31 @@ class TestInterviewStep:
                 id="ask-with-animal",
             ),
             pytest.param(
+                {
+                    "action": "ASK",
+                    "question": "Q?",
+                    "animal_description": "A lone hunter.",
+                },
+                id="ask-with-description",
+            ),
+            pytest.param(
+                {
+                    "action": "FINISH",
+                    "profile": "P",
+                    "suggested_animal": "Red fox",
+                },
+                id="finish-without-description",
+            ),
+            pytest.param(
+                {
+                    "action": "FINISH",
+                    "profile": "P",
+                    "suggested_animal": "Red fox",
+                    "animal_description": "   ",
+                },
+                id="finish-with-blank-description",
+            ),
+            pytest.param(
                 {"action": "FINISH", "profile": "P"},
                 id="finish-without-animal",
             ),
@@ -95,6 +123,7 @@ class TestInterviewStep:
                     "action": "FINISH",
                     "profile": "P",
                     "suggested_animal": "Red fox",
+                    "animal_description": "A lone hunter.",
                     "question": "Q?",
                 },
                 id="finish-with-question",
@@ -118,6 +147,7 @@ class TestInterviewStep:
                 "action": "FINISH",
                 "profile": "The subject hoards stationery.",
                 "suggested_animal": "Eurasian magpie",
+                "animal_description": "A shameless thief of anything shiny.",
             }
         )
 
@@ -126,6 +156,7 @@ class TestInterviewStep:
         assert profile == BehaviouralProfile(
             profile="The subject hoards stationery.",
             suggested_animal="Eurasian magpie",
+            animal_description="A shameless thief of anything shiny.",
         )
 
     def test_to_profile_is_none_for_an_ask_step(self) -> None:
@@ -139,17 +170,34 @@ class TestBehaviouralProfile:
         profile = BehaviouralProfile(
             profile="The subject forages at night and hoards stationery.",
             suggested_animal="Eurasian magpie",
+            animal_description="A shameless thief of anything shiny.",
         )
         assert profile.suggested_animal == "Eurasian magpie"
+        assert profile.animal_description == "A shameless thief of anything shiny."
         assert "stationery" in profile.profile
 
     @pytest.mark.parametrize(
         "payload",
         [
-            {"profile": "", "suggested_animal": "Red fox"},
-            {"profile": "  ", "suggested_animal": "Red fox"},
-            {"profile": "Something", "suggested_animal": ""},
-            {"profile": "Something", "suggested_animal": "   "},
+            {"profile": "", "suggested_animal": "Red fox", "animal_description": "D"},
+            {"profile": "  ", "suggested_animal": "Red fox", "animal_description": "D"},
+            {"profile": "Something", "suggested_animal": "", "animal_description": "D"},
+            {
+                "profile": "Something",
+                "suggested_animal": "   ",
+                "animal_description": "D",
+            },
+            {
+                "profile": "Something",
+                "suggested_animal": "Red fox",
+                "animal_description": "",
+            },
+            {
+                "profile": "Something",
+                "suggested_animal": "Red fox",
+                "animal_description": "   ",
+            },
+            {"profile": "Something", "suggested_animal": "Red fox"},
             {"profile": "Something"},
             {"suggested_animal": "Red fox"},
         ],
@@ -158,6 +206,9 @@ class TestBehaviouralProfile:
             "blank-profile",
             "empty-animal",
             "blank-animal",
+            "empty-description",
+            "blank-description",
+            "missing-description",
             "missing-animal",
             "missing-profile",
         ],
@@ -165,3 +216,12 @@ class TestBehaviouralProfile:
     def test_rejects_empty_or_missing_fields(self, payload: dict[str, str]) -> None:
         with pytest.raises(ValidationError):
             BehaviouralProfile.model_validate(payload)
+
+    def test_a_long_description_is_kept_whole(self) -> None:
+        """Normalisation never truncates: the reveal is spoken, not parsed."""
+        note = "A creature of habit who patrols the same corridor every morning."
+        profile = BehaviouralProfile(
+            profile="P", suggested_animal="Red fox", animal_description=note
+        )
+
+        assert profile.animal_description == note

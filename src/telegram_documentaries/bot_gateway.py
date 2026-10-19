@@ -42,6 +42,7 @@ from telegram_documentaries.interviewer import (
 )
 from telegram_documentaries.logging_utils import log_phase_transition
 from telegram_documentaries.models import (
+    BehaviouralProfile,
     InterviewAction,
     InterviewAnswer,
     InterviewStep,
@@ -122,7 +123,8 @@ INTERVIEW_RETRY_MSG = (
 PROFILE_REVEAL_TEMPLATE = (
     "The dossier is closed - and the crew has seen enough of you.\n\n"
     "{profile}\n\n"
-    "Suggested casting: {animal}"
+    "Suggested casting: {animal}\n"
+    "{animal_description}"
 )
 #: Catch-all after an unexpected failure on the conversation path.
 DISPATCH_FAILURE_MSG = (
@@ -456,6 +458,37 @@ async def _ask_question(
     return True
 
 
+async def _finish_interview(
+    client: TelegramClient,
+    session: SessionState,
+    final_profile: BehaviouralProfile,
+) -> None:
+    """Store the dossier, move to CONVERT and reveal the case file.
+
+    The single finish path for both routes into it (the model chose FINISH, or
+    the ceiling forced it), so the reveal template is formatted in one place.
+    """
+    chat_id = session.chat_id
+    session.interview.profile = final_profile
+    log_phase_transition(logger, chat_id, session.phase, Phase.CONVERT)
+    session.phase = Phase.CONVERT
+    logger.info(
+        "interview_finished chat_id=%s answers=%s animal=%r",
+        chat_id,
+        len(session.interview.answers),
+        final_profile.suggested_animal,
+    )
+    await _send(
+        client,
+        chat_id,
+        PROFILE_REVEAL_TEMPLATE.format(
+            profile=final_profile.profile,
+            animal=final_profile.suggested_animal,
+            animal_description=final_profile.animal_description,
+        ),
+    )
+
+
 async def _handle_answer(
     client: TelegramClient,
     interviewer: InterviewerClient,
@@ -482,21 +515,31 @@ async def _handle_answer(
         len(answer),
     )
 
+    if in_hand >= MAX_QUESTIONS:
+        # Ceiling reached: the profile is forced, no step is asked for. The
+        # distilled profile goes straight to _finish_interview - rebuilding an
+        # InterviewStep from its parts would silently drop any new field.
+        try:
+            distilled = await interviewer.distil(interview, answer)
+        except (GeminiApiError, TelegramApiError):
+            # Nothing recorded: the pending question stays pending, so
+            # resending the same answer cannot duplicate it.
+            logger.exception("interviewer failed chat_id=%s", chat_id)
+            await _send(client, chat_id, INTERVIEW_RETRY_MSG)
+            return
+        interview.answers.append(InterviewAnswer(question=pending, answer=answer))
+        interview.pending_question = None
+        await _finish_interview(client, session, distilled)
+        return
+
     try:
         if in_hand < MIN_QUESTIONS:
             step = InterviewStep(
                 action=InterviewAction.ASK,
                 question=await interviewer.next_question(interview, answer),
             )
-        elif in_hand < MAX_QUESTIONS:
-            step = await interviewer.next_step(interview, answer)
         else:
-            profile = await interviewer.distil(interview, answer)
-            step = InterviewStep(
-                action=InterviewAction.FINISH,
-                profile=profile.profile,
-                suggested_animal=profile.suggested_animal,
-            )
+            step = await interviewer.next_step(interview, answer)
     except (GeminiApiError, TelegramApiError):
         # Nothing recorded: the pending question stays pending, so resending
         # the same answer cannot duplicate it.
@@ -514,23 +557,7 @@ async def _handle_answer(
             logger.error("interview_finish_without_profile chat_id=%s", chat_id)
             await _send(client, chat_id, INTERVIEW_RETRY_MSG)
             return
-        interview.profile = final_profile
-        log_phase_transition(logger, chat_id, session.phase, Phase.CONVERT)
-        session.phase = Phase.CONVERT
-        logger.info(
-            "interview_finished chat_id=%s answers=%s animal=%r",
-            chat_id,
-            len(interview.answers),
-            final_profile.suggested_animal,
-        )
-        await _send(
-            client,
-            chat_id,
-            PROFILE_REVEAL_TEMPLATE.format(
-                profile=final_profile.profile,
-                animal=final_profile.suggested_animal,
-            ),
-        )
+        await _finish_interview(client, session, final_profile)
         return
 
     question = step.question

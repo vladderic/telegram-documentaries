@@ -75,7 +75,9 @@ class TestInterviewState:
         assert interview.is_finished is False
 
         interview.profile = BehaviouralProfile(
-            profile="The subject hoards tea cups.", suggested_animal="Red fox"
+            profile="The subject hoards tea cups.",
+            suggested_animal="Red fox",
+            animal_description="A lone hunter of the small hours.",
         )
         assert interview.is_finished is True
 
@@ -84,7 +86,9 @@ class TestInterviewState:
         state.interview.answers.append(InterviewAnswer(question="Q1?", answer="A1"))
         state.interview.pending_question = "Q2?"
         state.interview.profile = BehaviouralProfile(
-            profile="Finished early.", suggested_animal="Red fox"
+            profile="Finished early.",
+            suggested_animal="Red fox",
+            animal_description="A lone hunter of the small hours.",
         )
 
         state.clear()

@@ -240,6 +240,7 @@ class TestNextStep:
                         "action": "FINISH",
                         "profile": "The subject is a nocturnal hoarder.",
                         "suggested_animal": "Red fox",
+                        "animal_description": "A lone hunter of the small hours.",
                     }
                 ),
             )
@@ -252,6 +253,7 @@ class TestNextStep:
 
         assert step.action is InterviewAction.FINISH
         assert step.suggested_animal == "Red fox"
+        assert step.animal_description == "A lone hunter of the small hours."
 
     @pytest.mark.asyncio
     async def test_prompt_states_the_five_to_seven_rule(self) -> None:
@@ -277,6 +279,7 @@ class TestNextStep:
             "question",
             "profile",
             "suggested_animal",
+            "animal_description",
         }
         assert body["generationConfig"]["responseSchema"]["properties"]["action"][
             "enum"
@@ -315,6 +318,7 @@ class TestDistil:
                     {
                         "profile": "The subject patrols the kitchen at midnight.",
                         "suggested_animal": "Red fox",
+                        "animal_description": "A lone hunter of the small hours.",
                     }
                 ),
             )
@@ -327,12 +331,19 @@ class TestDistil:
 
         assert isinstance(profile, BehaviouralProfile)
         assert profile.suggested_animal == "Red fox"
+        assert profile.animal_description == "A lone hunter of the small hours."
 
         body = request_body(seen)
         assert set(body["generationConfig"]["responseSchema"]["properties"]) == {
             "profile",
             "suggested_animal",
+            "animal_description",
         }
+        assert body["generationConfig"]["responseSchema"]["required"] == [
+            "profile",
+            "suggested_animal",
+            "animal_description",
+        ]
 
         lowered = prompt_text(body).lower()
         assert "third person" in lowered
@@ -343,6 +354,19 @@ class TestDistil:
         # A clean species name, not a punchline ("the common trash-raiding
         # seagull" was live output the Converter cannot use).
         assert "species name" in lowered
+        assert "no leading article" in lowered
+        # The schema description is the strongest lever the model obeys.
+        properties = body["generationConfig"]["responseSchema"]["properties"]
+        assert "no article" in properties["suggested_animal"]["description"].lower()
+        assert "no clause" in properties["suggested_animal"]["description"].lower()
+        assert (
+            "one short sentence"
+            in properties["animal_description"]["description"].lower()
+        )
+        # The flavour line is a separate field: the reveal shows it, the
+        # Converter ignores it.
+        assert "animal_description" in lowered
+        assert "one short sentence" in lowered
 
     @pytest.mark.asyncio
     async def test_empty_profile_from_the_model_is_a_typed_failure(self) -> None:
@@ -350,6 +374,25 @@ class TestDistil:
             return httpx.Response(
                 200,
                 json=gemini_response({"profile": "", "suggested_animal": "Red fox"}),
+            )
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(GeminiApiError):
+                await client.distil(interview_with(("Q1?", "A1")), answer="A1")
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_profile_without_a_description_is_a_typed_failure(self) -> None:
+        """Both reveal fields are required - the reveal must never half-format."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json=gemini_response(
+                    {"profile": "The subject hoards spoons.", "suggested_animal": "Fox"}
+                ),
             )
 
         client = make_client(handler)

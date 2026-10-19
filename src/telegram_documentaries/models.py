@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel,
     Field,
     RootModel,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -181,14 +182,16 @@ class InterviewStep(BaseModel):
     """The model's decision: ask the next question, or finish.
 
     The consistency validator is the contract guarantee: an ASK step carries
-    exactly a question, a FINISH step carries exactly the profile and animal.
-    A malformed model response can never leak downstream as a raw dict.
+    exactly a question, a FINISH step carries exactly the profile, the animal
+    and its one-line description. A malformed model response can never leak
+    downstream as a raw dict.
     """
 
     action: InterviewAction
     question: str | None = None
     profile: str | None = None
     suggested_animal: str | None = None
+    animal_description: str | None = None
 
     model_config = {
         "extra": "ignore",
@@ -199,7 +202,11 @@ class InterviewStep(BaseModel):
         if self.action is InterviewAction.ASK:
             if not isinstance(self.question, str) or not self.question.strip():
                 raise ValueError("an ASK step must carry a non-empty question")
-            if self.profile is not None or self.suggested_animal is not None:
+            if (
+                self.profile is not None
+                or self.suggested_animal is not None
+                or self.animal_description is not None
+            ):
                 raise ValueError("an ASK step must not carry profile fields")
         else:  # FINISH
             if not isinstance(self.profile, str) or not self.profile.strip():
@@ -209,6 +216,11 @@ class InterviewStep(BaseModel):
                 or not self.suggested_animal.strip()
             ):
                 raise ValueError("a FINISH step must carry a non-empty animal")
+            if (
+                not isinstance(self.animal_description, str)
+                or not self.animal_description.strip()
+            ):
+                raise ValueError("a FINISH step must carry a non-empty description")
             if self.question is not None:
                 raise ValueError("a FINISH step must not carry a question")
         return self
@@ -217,41 +229,46 @@ class InterviewStep(BaseModel):
         """The profile of a FINISH step, or ``None`` when this step is not one.
 
         Typed accessor so callers never have to narrow ``profile`` /
-        ``suggested_animal`` themselves; the consistency validator above
-        guarantees the fields are present when the action is FINISH.
+        ``suggested_animal`` / ``animal_description`` themselves; the
+        consistency validator above guarantees the fields are present when the
+        action is FINISH.
         """
         if self.action is not InterviewAction.FINISH:
             return None
-        if self.profile is None or self.suggested_animal is None:
+        if (
+            self.profile is None
+            or self.suggested_animal is None
+            or self.animal_description is None
+        ):
             return None  # unreachable past the validator - never trust blindly
         return BehaviouralProfile(
             profile=self.profile,
             suggested_animal=self.suggested_animal,
+            animal_description=self.animal_description,
         )
 
 
 class BehaviouralProfile(BaseModel):
-    """The Interviewer's output: the dossier that fuels later stages."""
+    """The Interviewer's output: the dossier that fuels later stages.
+
+    ``suggested_animal`` is a bare species name (Phase 4 feeds it to the image
+    model), while ``animal_description`` is the in-character flavour line the
+    gateway shows the user - two different jobs, two different fields.
+    """
 
     profile: str
     suggested_animal: str
+    animal_description: str
 
     model_config = {
         "extra": "ignore",
     }
 
-    @field_validator("profile")
+    @field_validator("profile", "suggested_animal", "animal_description")
     @classmethod
-    def validate_profile(cls, v: str) -> str:
+    def validate_non_empty(cls, v: str, info: ValidationInfo) -> str:
         if not isinstance(v, str) or not v.strip():
-            raise ValueError("profile must be a non-empty string")
-        return v.strip()
-
-    @field_validator("suggested_animal")
-    @classmethod
-    def validate_suggested_animal(cls, v: str) -> str:
-        if not isinstance(v, str) or not v.strip():
-            raise ValueError("suggested_animal must be a non-empty string")
+            raise ValueError(f"{info.field_name} must be a non-empty string")
         return v.strip()
 
 

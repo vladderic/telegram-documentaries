@@ -79,9 +79,15 @@ PROFILE_RULES = (
     "- 4-7 sentences of rich human personality: habits, quirks and manner.\n"
     "- Ground every claim only in the answers given - invent nothing.\n"
     "- Playful case-file register.\n"
-    "- suggested_animal must be the plain species name of a real animal "
-    "(for example 'red fox' or 'herring gull') whose real traits echo that "
-    "human personality - no nicknames, no jokes, no descriptions."
+    "- suggested_animal must be the bare species name of a real animal whose "
+    "real traits echo that human personality: one to three words, no leading "
+    "article, no adjectives beyond the species itself, no clauses, no "
+    "punctuation, no nicknames - 'red fox', never 'the cunning red fox that "
+    "raids the bins' and never 'a fox'.\n"
+    "- animal_description must be exactly one short sentence (at most 20 "
+    "words) of documentary narration about that species' behaviour, echoing "
+    "the subject's traits - it is the line the crew reads out loud, so it may "
+    "be playful but must stay a real species."
 )
 
 #: Structured-output schemas (the boundary contract, one per call).
@@ -91,13 +97,32 @@ QUESTION_SCHEMA: dict[str, Any] = {
     "required": ["question"],
 }
 
+#: Descriptions are the strongest schema-level lever: the model follows them
+#: far more reliably than prose rules (the live "a common pigeon, constantly
+#: pecking at bright objects..." reveal is what prompted this split).
+_ANIMAL_SCHEMA: dict[str, str] = {
+    "type": "string",
+    "description": (
+        "Bare species name of a real animal, one to three words, no article, "
+        "no clause, no nickname, no punctuation - for example 'red fox'."
+    ),
+}
+_ANIMAL_DESCRIPTION_SCHEMA: dict[str, str] = {
+    "type": "string",
+    "description": (
+        "Exactly one short sentence (at most 20 words) of playful documentary "
+        "narration about that species' behaviour."
+    ),
+}
+
 STEP_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "action": {"type": "string", "enum": ["ASK", "FINISH"]},
         "question": {"type": "string"},
         "profile": {"type": "string"},
-        "suggested_animal": {"type": "string"},
+        "suggested_animal": _ANIMAL_SCHEMA,
+        "animal_description": _ANIMAL_DESCRIPTION_SCHEMA,
     },
     "required": ["action"],
 }
@@ -106,9 +131,10 @@ PROFILE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "profile": {"type": "string"},
-        "suggested_animal": {"type": "string"},
+        "suggested_animal": _ANIMAL_SCHEMA,
+        "animal_description": _ANIMAL_DESCRIPTION_SCHEMA,
     },
-    "required": ["profile", "suggested_animal"],
+    "required": ["profile", "suggested_animal", "animal_description"],
 }
 
 
@@ -226,7 +252,7 @@ class InterviewerClient:
 
         Returns:
             The parsed :class:`InterviewStep` (ASK carries a question; FINISH
-            carries the profile and animal).
+            carries the profile, the animal and its one-line description).
 
         Raises:
             GeminiApiError: On transport/HTTP failures, an unexpected response
@@ -238,7 +264,8 @@ class InterviewerClient:
             f"{QUESTION_RULES}\n\n"
             f"You have {in_hand} answers in hand. Choose:\n"
             f"- ASK your next question, or\n"
-            f"- FINISH with the profile and the suggested animal.\n"
+            f"- FINISH with the profile, the suggested animal and its "
+            f"one-line description.\n"
             f"Ask only while you have fewer than {MAX_QUESTIONS} answers, and "
             f"finish no earlier than {MIN_QUESTIONS}.\n\n"
             f"{build_transcript(interview, answer)}"
@@ -255,9 +282,11 @@ class InterviewerClient:
             logger.info("interview_step action=ASK in_hand=%s", in_hand)
         else:
             logger.info(
-                "interview_step action=FINISH in_hand=%s animal=%r",
+                "interview_step action=FINISH in_hand=%s animal=%r "
+                "animal_description=%r",
                 in_hand,
                 step.suggested_animal,
+                step.animal_description,
             )
         return step
 
@@ -272,18 +301,19 @@ class InterviewerClient:
             answer: The tentative final answer.
 
         Returns:
-            The typed :class:`BehaviouralProfile` (rich text + real animal).
+            The typed :class:`BehaviouralProfile` (rich text, bare species
+            name and one-line description).
 
         Raises:
             GeminiApiError: On transport/HTTP failures, an unexpected response
-                shape, or an empty profile/animal.
+                shape, or an empty profile/animal/description.
         """
         in_hand = _count_with_tentative(interview, answer)
         prompt = (
             f"{INTERVIEWER_PERSONA}\n\n"
             f"{PROFILE_RULES}\n\n"
             f"You have {in_hand} answers - that is enough. Write the profile "
-            f"now, with the suggested animal.\n\n"
+            f"now, with the bare species name and its one-line description.\n\n"
             f"{build_transcript(interview, answer)}"
         )
         data = await self._gemini.generate(_contents(prompt), PROFILE_SCHEMA)
@@ -295,8 +325,9 @@ class InterviewerClient:
                 f"({type(exc).__name__})"
             ) from None
         logger.info(
-            "interview_profile animal=%r chars=%s",
+            "interview_profile animal=%r animal_description=%r chars=%s",
             profile.suggested_animal,
+            profile.animal_description,
             len(profile.profile),
         )
         return profile

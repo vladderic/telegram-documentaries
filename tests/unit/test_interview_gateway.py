@@ -38,6 +38,7 @@ ACCEPT_VERDICT = BouncerVerdict(
 DISTILLED_PROFILE = BehaviouralProfile(
     profile="The subject patrols the kitchen at midnight, seeking snacks.",
     suggested_animal="Red fox",
+    animal_description="A lone hunter of the small hours.",
 )
 #: Immediate acknowledgement the photo flow sends while it downloads + judges.
 PHOTO_HOLD = bot_gateway.PHOTO_HOLD_MSG
@@ -332,6 +333,7 @@ class TestAnswerRouting:
             action=InterviewAction.FINISH,
             profile="The subject hoards stationery.",
             suggested_animal="Eurasian magpie",
+            animal_description="A shameless thief of anything shiny.",
         )
         send = new_send()
         interviewer = FakeInterviewer(
@@ -363,7 +365,10 @@ class TestAnswerRouting:
         assert texts[7] == bot_gateway.PROFILE_REVEAL_TEMPLATE.format(
             profile=finish.profile,
             animal=finish.suggested_animal,
+            animal_description=finish.animal_description,
         )
+        assert "A shameless thief of anything shiny." in texts[7]
+        assert texts[7].count("Eurasian magpie") == 1
         # Phase advanced to CONVERT: the next message gets the holding reply.
         assert texts[8] == bot_gateway.LATER_PHASE_REPLY
         assert interviewer.methods[-1] == "next_step"
@@ -414,7 +419,9 @@ class TestAnswerRouting:
         assert sent_texts(send)[-1] == bot_gateway.PROFILE_REVEAL_TEMPLATE.format(
             profile=DISTILLED_PROFILE.profile,
             animal=DISTILLED_PROFILE.suggested_animal,
+            animal_description=DISTILLED_PROFILE.animal_description,
         )
+        assert "A lone hunter of the small hours." in sent_texts(send)[-1]
 
 
 class TestNonTextInput:
