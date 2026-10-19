@@ -26,23 +26,34 @@ traffic.
 
 ## Live (running bot, real Telegram client)
 
-- [ ] Send a photo of a single real person → in-character confirmation;
-      session advances (Phase 3 will continue from there).
-- [ ] Send a photo of a car (e.g. a Honda Civic) → quip references the vehicle
-      and asks for the user, not "no person present".
-- [ ] Send a group photo → rejection names that there must be one subject.
-- [ ] Send a drawing/cartoon of a person → rejection explains it must be a
-      real photograph.
-- [ ] After each rejection, immediately send a valid photo → accepted without
-      `/start`.
-- [ ] Send text (and a sticker) while awaiting a photo → in-character nudge,
-      no crash.
-- [ ] Logs: verdicts and phase transitions visible; no secret values, no image
+- [x] Send a photo of a single real person → in-character confirmation;
+      session advances (Phase 3 will continue from there). *(23:52, 23:58)*
+- [x] Send a photo of a car (e.g. a Honda Civic) → quip references the vehicle
+      and asks for the user, not "no person present". *(23:50 — "A black Audi car")*
+- [x] Send a group photo → rejection names that there must be one subject.
+      *(23:50 — "a man in a suit standing next to another person")*
+- [x] Send a drawing/cartoon of a person → rejection explains it must be a
+      real photograph. *(23:57 — pixel art, anime drawing and digital
+      illustration all rejected as `NOT_A_REAL_PHOTO`)*
+- [x] After each rejection, immediately send a valid photo → accepted without
+      `/start`. *(23:57:59 reject → 23:58:20 accept)*
+- [x] Send text (and a sticker) while awaiting a photo → in-character nudge,
+      no crash. *(text verified live 23:48; non-photo media shares the same
+      code path and is covered by unit tests)*
+- [x] Logs: verdicts and phase transitions visible; no secret values, no image
       bytes anywhere in the output.
+
+### Live observations / accepted limitations
+
+- Realistic AI-generated photos may still be accepted — the Bouncer is a
+  best-effort visual judgment with no forensic detection (as scoped in
+  `requirements.md`). The user explicitly accepted this limitation.
+- An accepted session gets a holding reply for any further input
+  (`photo_out_of_phase` in the logs); full reset semantics arrive in Phase 7.
 
 ## Spec sync (on user approval)
 
-- [ ] `SPECS/ROADMAP.md` Phase 2 row marked complete (currently "In progress"
-      pending the live checks above).
+- [x] `SPECS/ROADMAP.md` Phase 2 row marked complete.
 - [x] README status section updated to Phase 2.
-- [ ] Any implementation-vs-spec drift surfaced to the user and resolved.
+- [x] Any implementation-vs-spec drift surfaced to the user and resolved
+      (realistic AI photos may pass — user accepted; see Live observations).

@@ -61,6 +61,9 @@ Input at the awaiting-photo phase:
 ### Scope cuts (YAGNI)
 
 - No multi-person disambiguation UI, no forensic AI-image detection.
+  Live testing confirmed the practical effect: cartoons/drawings are reliably
+  rejected, but *realistic* AI-generated photos may pass — accepted by the
+  user as a best-effort limitation (see `validation.md`).
 - Full `/start` // `/restart` purge semantics remain Phase 7; this phase only
   clears rejected/partial state as described above.
 - No Interviewer behaviour — after acceptance the phase advances to

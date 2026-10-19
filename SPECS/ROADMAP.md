@@ -59,7 +59,7 @@ at-wrong-stage guards across all phases, API-timeout fallbacks.
 | Phase | Status |
 |-------|--------|
 | 1 — Repository & gateway | Complete |
-| 2 — Bouncer | In progress (automated checks green; live Telegram verification pending) |
+| 2 — Bouncer | Complete |
 | 3 — Interviewer | Not started |
 | 4 — Converter | Not started |
 | 5 — Scripter | Not started |
