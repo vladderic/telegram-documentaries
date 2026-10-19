@@ -415,7 +415,7 @@ class InterviewState(BaseModel):
 class SessionState(BaseModel):
     """Typed per-chat_id session state.
 
-    The schema is versioned; this is v1.2 (adds the Phase 5 script text).
+    The schema is versioned; this is v1.3 (adds the Phase 6 voice-note flag).
     Contains the current phase, any stored photo reference (file_id and local
     path as stored), the interview progress, the narration once written, and
     provides a clear operation to reset state.
@@ -435,6 +435,10 @@ class SessionState(BaseModel):
     #: the voice note from these very words, so no second model call can make
     #: the audio say something the user never read.
     script_text: str | None = None
+    #: Whether the voice note for this session has been delivered (Phase 6):
+    #: one narration means exactly one voice note, no matter how many late
+    #: messages arrive.
+    voice_note_sent: bool = False
 
     model_config = {
         "extra": "ignore",
@@ -449,6 +453,7 @@ class SessionState(BaseModel):
         self.photo_mime_type = "image/jpeg"
         self.temp_media_path = None
         self.script_text = None
+        self.voice_note_sent = False
         self.interview = InterviewState()
 
     def to_dict(self) -> dict[str, Any]:

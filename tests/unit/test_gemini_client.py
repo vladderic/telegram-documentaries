@@ -279,3 +279,97 @@ class TestGenerateImage:
             await client.close()
 
         assert PLACEHOLDER_API_KEY not in str(caught.value)
+
+
+def audio_response(
+    mime_type: str = "audio/l16; rate=24000; channels=1",
+) -> dict[str, Any]:
+    """Wrap a base64 audio payload in a realistic Gemini TTS envelope."""
+    return {
+        "candidates": [
+            {
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "inlineData": {
+                                "mimeType": mime_type,
+                                "data": "cGxhY2Vob2xkZXI=",
+                            }
+                        }
+                    ],
+                },
+                "finishReason": "STOP",
+            }
+        ],
+        "modelVersion": TEST_MODEL,
+    }
+
+
+class TestGenerateAudio:
+    @pytest.mark.asyncio
+    async def test_sends_the_script_verbatim_with_audio_modality_and_voice(
+        self,
+    ) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json=audio_response())
+
+        client = make_client(handler)
+        try:
+            audio = await client.generate_audio("The raccoon stirs.", voice="Charon")
+        finally:
+            await client.close()
+
+        body = json.loads(seen[0].content)
+        # The script is the sole content - no style wrapper, no system turn.
+        assert body["contents"] == [{"parts": [{"text": "The raccoon stirs."}]}]
+        assert "systemInstruction" not in body
+        assert body["generationConfig"]["responseModalities"] == ["AUDIO"]
+        assert body["generationConfig"]["speechConfig"] == {
+            "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Charon"}}
+        }
+        assert audio.data == "cGxhY2Vob2xkZXI="
+        assert audio.mime_type == "audio/l16; rate=24000; channels=1"
+
+    @pytest.mark.asyncio
+    async def test_http_error_is_typed_and_never_leaks_the_key(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, text="boom")
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(GeminiApiError) as caught:
+                await client.generate_audio("text", voice="Charon")
+        finally:
+            await client.close()
+
+        assert PLACEHOLDER_API_KEY not in str(caught.value)
+
+    @pytest.mark.asyncio
+    async def test_missing_inline_audio_raises_a_typed_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"candidates": []})
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(GeminiApiError):
+                await client.generate_audio("text", voice="Charon")
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_a_text_only_response_is_rejected(self) -> None:
+        # A TTS model that answered with text (or an empty part) must fail
+        # loudly rather than reach the encoder with nothing.
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=gemini_response({"text": ""}))
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(GeminiApiError):
+                await client.generate_audio("text", voice="Charon")
+        finally:
+            await client.close()

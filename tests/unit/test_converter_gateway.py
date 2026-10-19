@@ -26,6 +26,7 @@ from telegram_documentaries.models import (
     Script,
     Update,
 )
+from telegram_documentaries.narrator import VoiceNote
 
 PLACEHOLDER_TOKEN = "123456-PLACEHOLDER-TELEGRAM-BOT-TOKEN"
 PLACEHOLDER_GEMINI_KEY = "PLACEHOLDER-GEMINI-API-KEY"
@@ -173,6 +174,21 @@ class FakeScripter:
         self.closed = True
 
 
+class FakeNarrator:
+    """Minimal stand-in for :class:`NarratorClient` (one canned voice note)."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.closed = False
+
+    async def speak(self, text: str) -> VoiceNote:
+        self.calls.append(text)
+        return VoiceNote(data=b"MP3-BYTES", mime_type="audio/mpeg", duration=7)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 class FakeInterviewer:
     """Scripted stand-in for :class:`InterviewerClient` (no recording needed)."""
 
@@ -241,6 +257,7 @@ async def run_updates(
     mock_client.get_updates = AsyncMock(side_effect=updates)
     mock_client.send_message = send
     mock_client.send_photo = send_photo
+    mock_client.send_voice = AsyncMock(return_value={"ok": True})
     mock_client.download_file = AsyncMock(return_value=PORTRAIT_BYTES)
     mock_client.close = AsyncMock()
 
@@ -256,6 +273,7 @@ async def run_updates(
         patch.object(bot_gateway, "InterviewerClient", return_value=interviewer),
         patch.object(bot_gateway, "ConverterClient", return_value=converter),
         patch.object(bot_gateway, "ScripterClient", return_value=FakeScripter()),
+        patch.object(bot_gateway, "NarratorClient", return_value=FakeNarrator()),
         patch.object(bot_gateway, "_now", return_value=DEFAULT_NOW),
     ):
         await bot_gateway.run_bot(

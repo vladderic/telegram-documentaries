@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from telegram_documentaries import bot_gateway
 from telegram_documentaries.models import GeneratedImage, Update
+from telegram_documentaries.narrator import VoiceNote
 
 PLACEHOLDER_TOKEN = "123456:PLACEHOLDER-TELEGRAM-BOT-TOKEN"
 
@@ -486,3 +487,53 @@ class TestSendPhoto:
 
         assert "400" in str(caught.value)
         assert PLACEHOLDER_TOKEN not in str(caught.value)
+
+
+class TestSendVoice:
+    NOTE = VoiceNote(data=b"\xff\xfb\x90\x00-mp3", mime_type="audio/mpeg", duration=17)
+
+    @pytest.mark.asyncio
+    async def test_posts_a_multipart_upload_and_returns_api_payload(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(
+                200, json={"ok": True, "result": {"message_id": 202, "date": 3}}
+            )
+
+        client = make_client(handler)
+        try:
+            result = await client.send_voice(chat_id=555, voice=self.NOTE)
+        finally:
+            await client.close()
+
+        assert result == {"ok": True, "result": {"message_id": 202, "date": 3}}
+        request = seen[0]
+        assert request.method == "POST"
+        assert request.url.path == f"/bot{PLACEHOLDER_TOKEN}/sendVoice"
+        assert request.headers["content-type"].startswith("multipart/form-data")
+        body = request.read()
+        assert b'name="chat_id"' in body and b"555" in body
+        assert b'name="duration"' in body and b"17" in body
+        assert b'name="voice"; filename="narration.mp3"' in body
+        assert b"audio/mpeg" in body
+        assert b"\xff\xfb\x90\x00-mp3" in body
+
+    @pytest.mark.asyncio
+    async def test_a_failed_voice_upload_is_never_retried(self) -> None:
+        attempts: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request)
+            return httpx.Response(500, text="nope")
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(bot_gateway.TelegramApiError):
+                await client.send_voice(chat_id=555, voice=self.NOTE)
+        finally:
+            await client.close()
+
+        # A retried upload could post the same voice note twice.
+        assert len(attempts) == 1

@@ -18,6 +18,7 @@ import logging
 from typing import Any
 
 import httpx
+from pydantic import BaseModel, Field, ValidationError
 
 from telegram_documentaries.config import REDACTED
 from telegram_documentaries.logging_utils import log_async_call
@@ -30,6 +31,16 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 class GeminiApiError(Exception):
     """Gemini API failure (typed; the message never contains the API key)."""
+
+
+class InlineAudio(BaseModel):
+    """The inline audio part of a TTS response (untrusted boundary value).
+
+    ``data`` stays base64 exactly as the API sent it; the Narrator decodes it.
+    """
+
+    data: str = Field(min_length=1)
+    mime_type: str = Field(min_length=1)
 
 
 def generate_url(model: str) -> str:
@@ -194,3 +205,52 @@ class GeminiClient:
                 "Gemini API returned an unexpected response shape (not a JSON object)"
             )
         return decoded
+
+    async def generate_audio(
+        self,
+        text: str,
+        *,
+        voice: str,
+    ) -> InlineAudio:
+        """Run one TTS call and return the inline audio part (Phase 6).
+
+        The text is sent verbatim: the TTS model reads exactly what it is given,
+        and cannot be styled out-of-band (no ``speech_metadata``, no system
+        instruction - both are rejected for this model). A style prefix in the
+        prompt is spoken aloud, so none is added here. The client is
+        constructed with the TTS model as its ``model``.
+
+        Args:
+            text: The narration, exactly as delivered to the user.
+            voice: Prebuilt voice name.
+
+        Returns:
+            The validated inline audio (base64 payload + declared media type).
+
+        Raises:
+            GeminiApiError: On transport/HTTP failures or a response without a
+                usable inline audio part. The API key is redacted from every
+                message.
+        """
+        data = await self._call(
+            {
+                "contents": [{"parts": [{"text": text}]}],
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}
+                    },
+                },
+            }
+        )
+        try:
+            inline = data["candidates"][0]["content"]["parts"][0]["inlineData"]
+            return InlineAudio(
+                data=inline["data"],
+                mime_type=inline["mimeType"],
+            )
+        except (KeyError, IndexError, TypeError, ValidationError) as exc:
+            raise GeminiApiError(
+                f"Gemini API returned an unexpected TTS response shape "
+                f"({type(exc).__name__})"
+            ) from None
