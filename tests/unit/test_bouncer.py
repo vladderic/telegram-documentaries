@@ -11,7 +11,7 @@ import logging
 import pytest
 
 from telegram_documentaries import bot_gateway, bouncer
-from telegram_documentaries.models import Message, PhotoSize
+from telegram_documentaries.models import Message, PhotoSize, PortraitSource
 
 
 def photo_sizes(
@@ -75,24 +75,31 @@ class StubSource:
         return self.data
 
 
-class TestFetchPhoto:
+class TestFetchPortrait:
+    """One intake for photos and image documents (Phase 4b).
+
+    The *choice* of portrait lives in ``portrait_source`` (tested below); this
+    tests the transfer and its edge guards: the declared size is checked before
+    any download, and the real bytes are checked again afterwards.
+    """
+
+    @staticmethod
+    def source(
+        *,
+        file_id: str = "p2-large",
+        mime_type: str = "image/png",
+        file_size: int | None = None,
+    ) -> PortraitSource:
+        return PortraitSource(file_id=file_id, mime_type=mime_type, file_size=file_size)
+
     @pytest.mark.asyncio
-    async def test_downloads_the_largest_photo_size(self) -> None:
-        source = StubSource(data=b"LARGEST-BYTES")
+    async def test_downloads_the_chosen_portrait(self) -> None:
+        source = StubSource(data=b"ORIGINAL-BYTES")
 
-        result = await bouncer.fetch_photo(source, photo_sizes())
+        result = await bouncer.fetch_portrait(source, self.source())
 
-        assert result == b"LARGEST-BYTES"
+        assert result == b"ORIGINAL-BYTES"
         assert source.requested == ["p2-large"]
-
-    @pytest.mark.asyncio
-    async def test_empty_photo_list_fails_loudly(self) -> None:
-        source = StubSource()
-
-        with pytest.raises(bouncer.PhotoValidationError):
-            await bouncer.fetch_photo(source, [])
-
-        assert source.requested == []
 
     @pytest.mark.asyncio
     async def test_oversized_by_metadata_never_downloads(self) -> None:
@@ -100,7 +107,7 @@ class TestFetchPhoto:
         oversized = bouncer.MAX_PHOTO_BYTES + 1
 
         with pytest.raises(bouncer.PhotoValidationError):
-            await bouncer.fetch_photo(source, photo_sizes(file_size=oversized))
+            await bouncer.fetch_portrait(source, self.source(file_size=oversized))
 
         # Edge guard: untrusted input is checked *before* any transfer.
         assert source.requested == []
@@ -111,14 +118,14 @@ class TestFetchPhoto:
         source = StubSource(data=b"x" * (bouncer.MAX_PHOTO_BYTES + 1))
 
         with pytest.raises(bouncer.PhotoValidationError):
-            await bouncer.fetch_photo(source, photo_sizes(file_size=None))
+            await bouncer.fetch_portrait(source, self.source())
 
     @pytest.mark.asyncio
     async def test_download_failure_propagates_as_typed_error(self) -> None:
         source = StubSource(error=bot_gateway.TelegramApiError("getFile failed"))
 
         with pytest.raises(bot_gateway.TelegramApiError):
-            await bouncer.fetch_photo(source, photo_sizes())
+            await bouncer.fetch_portrait(source, self.source())
 
     @pytest.mark.asyncio
     async def test_failures_are_logged_loudly_by_name(
@@ -131,14 +138,14 @@ class TestFetchPhoto:
             caplog.at_level(logging.DEBUG),
             pytest.raises(bot_gateway.TelegramApiError),
         ):
-            await bouncer.fetch_photo(source, photo_sizes())
+            await bouncer.fetch_portrait(source, self.source())
 
         warnings = [
             record.getMessage()
             for record in caplog.records
             if record.levelno >= logging.WARNING
         ]
-        assert any("fetch_photo" in message for message in warnings)
+        assert any("fetch_portrait" in message for message in warnings)
         assert any("TelegramApiError" in message for message in warnings)
 
 

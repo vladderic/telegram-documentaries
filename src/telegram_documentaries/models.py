@@ -398,6 +398,10 @@ class SessionState(BaseModel):
     phase: Phase = Phase.AWAITING_PHOTO
     photo_file_id: str | None = None
     photo_local_path: str | None = None
+    #: Media type of the stored portrait (Phase 4b): a photo is always JPEG,
+    #: a document keeps whatever Telegram declared. Never guessed at the
+    #: Converter call site.
+    photo_mime_type: str = "image/jpeg"
     temp_media_path: str | None = None
     interview: InterviewState = Field(default_factory=InterviewState)
 
@@ -411,6 +415,7 @@ class SessionState(BaseModel):
         self.phase = Phase.AWAITING_PHOTO
         self.photo_file_id = None
         self.photo_local_path = None
+        self.photo_mime_type = "image/jpeg"
         self.temp_media_path = None
         self.interview = InterviewState()
 

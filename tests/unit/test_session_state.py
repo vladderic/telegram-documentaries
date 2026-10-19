@@ -107,3 +107,25 @@ class TestInterviewState:
 
         assert second.interview.answers == []
         assert second.interview.pending_question is None
+
+
+class TestStoredPortraitMediaType:
+    """Phase 4b: what the stored portrait *is* travels with the session."""
+
+    def test_defaults_to_jpeg_for_a_telegram_photo(self) -> None:
+        assert SessionState(chat_id=555).photo_mime_type == "image/jpeg"
+
+    def test_records_the_media_type_of_a_file_portrait(self) -> None:
+        state = SessionState(chat_id=555, photo_mime_type="image/png")
+
+        assert state.photo_mime_type == "image/png"
+
+    def test_clear_resets_it_along_with_the_media_path(self) -> None:
+        state = SessionState(
+            chat_id=555, photo_local_path="/tmp/p.png", photo_mime_type="image/png"
+        )
+
+        state.clear()
+
+        assert state.photo_mime_type == "image/jpeg"
+        assert state.photo_local_path is None

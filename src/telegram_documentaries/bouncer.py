@@ -229,32 +229,32 @@ def portrait_source(message: Message) -> PortraitSource | None:
 
 
 @log_async_call(logger)
-async def fetch_photo(source: PhotoSource, photo: list[PhotoSize]) -> bytes:
-    """Download the photo from Telegram with edge validation (untrusted input).
+async def fetch_portrait(source: PhotoSource, portrait: PortraitSource) -> bytes:
+    """Download a portrait from Telegram with edge validation (untrusted input).
 
-    Selects the highest-resolution entry, checks the size limit *before*
-    download when metadata is present and again on the actual bytes after.
+    One intake for both upload kinds (Phase 4b): the caller passes whatever
+    :func:`portrait_source` decided is the portrait, so the size limit is
+    checked *before* the download (when Telegram declared a size) and again on
+    the actual bytes afterwards.
 
     Args:
         source: Provider for Telegram file bytes (the gateway's client).
-        photo: The Telegram photo-size array from the message.
+        portrait: The eligible upload chosen by :func:`portrait_source`.
 
     Returns:
         The raw image bytes, ready for the vision gate.
 
     Raises:
-        PhotoValidationError: If the photo is missing or exceeds
-            :data:`MAX_PHOTO_BYTES`.
+        PhotoValidationError: If the download exceeds :data:`MAX_PHOTO_BYTES`.
         TelegramApiError: On download failures (raised by ``source``).
     """
-    largest = select_photo_size(photo)
-    if largest.file_size is not None and largest.file_size > MAX_PHOTO_BYTES:
+    if portrait.file_size is not None and portrait.file_size > MAX_PHOTO_BYTES:
         raise PhotoValidationError(
-            f"photo too large: {largest.file_size} bytes > {MAX_PHOTO_BYTES}"
+            f"portrait too large: {portrait.file_size} bytes > {MAX_PHOTO_BYTES}"
         )
-    image_bytes = await source.download_file(largest.file_id)
+    image_bytes = await source.download_file(portrait.file_id)
     if len(image_bytes) > MAX_PHOTO_BYTES:
         raise PhotoValidationError(
-            f"photo too large: {len(image_bytes)} bytes > {MAX_PHOTO_BYTES}"
+            f"portrait too large: {len(image_bytes)} bytes > {MAX_PHOTO_BYTES}"
         )
     return image_bytes
