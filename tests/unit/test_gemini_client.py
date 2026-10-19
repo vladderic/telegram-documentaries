@@ -162,3 +162,64 @@ class TestGenerateUrl:
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"{TEST_MODEL}:generateContent"
         )
+
+
+def image_response(parts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Wrap parts in a realistic Gemini generateContent image envelope."""
+    return {
+        "candidates": [
+            {"content": {"role": "model", "parts": parts}, "finishReason": "STOP"}
+        ],
+        "modelVersion": TEST_MODEL,
+    }
+
+
+class TestGenerateImage:
+    @pytest.mark.asyncio
+    async def test_requests_image_modality_and_returns_the_parts(self) -> None:
+        seen: list[httpx.Request] = []
+        parts = [
+            {"inlineData": {"mimeType": "image/jpeg", "data": "cGxhY2Vob2xkZXI="}},
+        ]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json=image_response(parts))
+
+        client = make_client(handler)
+        try:
+            parts_out = await client.generate_image(CONTENTS)
+        finally:
+            await client.close()
+
+        body = json.loads(seen[0].content)
+        assert body["generationConfig"] == {"responseModalities": ["IMAGE"]}
+        assert body["contents"] == CONTENTS
+        assert "responseSchema" not in body["generationConfig"]
+        assert parts_out == parts
+
+    @pytest.mark.asyncio
+    async def test_missing_parts_raise_a_typed_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"candidates": []})
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(GeminiApiError):
+                await client.generate_image(CONTENTS)
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_http_error_is_typed_and_never_leaks_the_key(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, text="nope")
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(GeminiApiError) as caught:
+                await client.generate_image(CONTENTS)
+        finally:
+            await client.close()
+
+        assert PLACEHOLDER_API_KEY not in str(caught.value)

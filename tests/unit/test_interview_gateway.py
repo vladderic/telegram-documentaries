@@ -20,6 +20,7 @@ from telegram_documentaries.gemini import GeminiApiError
 from telegram_documentaries.models import (
     BehaviouralProfile,
     BouncerVerdict,
+    GeneratedImage,
     InterviewAction,
     InterviewAnswer,
     InterviewState,
@@ -42,6 +43,28 @@ DISTILLED_PROFILE = BehaviouralProfile(
 )
 #: Immediate acknowledgement the photo flow sends while it downloads + judges.
 PHOTO_HOLD = bot_gateway.PHOTO_HOLD_MSG
+#: The image the Converter fake hands back (the wiring is Phase 4's concern;
+#: these tests only need the finish routes to reach it without a real API call).
+CONVERTED_IMAGE = GeneratedImage(mime_type="image/jpeg", data=b"HYBRID-BYTES")
+
+
+class FakeConverter:
+    """Minimal stand-in for :class:`ConverterClient` (returns one canned image)."""
+
+    def __init__(self) -> None:
+        self.calls: list[BehaviouralProfile] = []
+        self.closed = False
+
+    async def fuse(
+        self, portrait: bytes, mime_type: str, profile: BehaviouralProfile
+    ) -> GeneratedImage:
+        self.calls.append(profile)
+        return CONVERTED_IMAGE
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 #: The clock the gateway sees in these tests: just before every fixture date,
 #: so normal answers are unambiguously "after" the question they answer.
 DEFAULT_NOW = 1_760_000_000.0
@@ -191,6 +214,7 @@ async def run_updates(
     media_root: str,
     vision: AsyncMock | None = None,
     download: AsyncMock | None = None,
+    converter: FakeConverter | None = None,
     now: float = DEFAULT_NOW,
 ) -> None:
     """Run ``run_bot`` with Telegram, the Bouncer and the Interviewer mocked.
@@ -203,6 +227,7 @@ async def run_updates(
     mock_client = AsyncMock()
     mock_client.get_updates = AsyncMock(side_effect=updates)
     mock_client.send_message = send
+    mock_client.send_photo = AsyncMock(return_value={"ok": True})
     mock_client.download_file = download or AsyncMock(return_value=b"JPEG-BYTES")
     mock_client.close = AsyncMock()
 
@@ -216,6 +241,9 @@ async def run_updates(
         patch.object(bot_gateway, "TelegramClient", return_value=mock_client),
         patch.object(bot_gateway, "GeminiVisionClient", return_value=vision),
         patch.object(bot_gateway, "InterviewerClient", return_value=interviewer),
+        patch.object(
+            bot_gateway, "ConverterClient", return_value=converter or FakeConverter()
+        ),
         patch.object(bot_gateway, "_now", return_value=now),
     ):
         await bot_gateway.run_bot(
@@ -369,8 +397,10 @@ class TestAnswerRouting:
         )
         assert "A shameless thief of anything shiny." in texts[7]
         assert texts[7].count("Eurasian magpie") == 1
-        # Phase advanced to CONVERT: the next message gets the holding reply.
-        assert texts[8] == bot_gateway.LATER_PHASE_REPLY
+        # Phase advanced to CONVERT: the hold line goes out while the portrait
+        # is generated, and the next message gets the holding reply.
+        assert texts[8] == bot_gateway.PORTRAIT_HOLD_MSG
+        assert texts[9] == bot_gateway.LATER_PHASE_REPLY
         assert interviewer.methods[-1] == "next_step"
         assert interviewer.methods.count("next_step") == 1
         assert interviewer.methods.count("distil") == 0
@@ -415,13 +445,15 @@ class TestAnswerRouting:
         assert last.method == "distil"
         assert last.answer == "A7"
         assert len(last.interview.answers) == 6
-        # The distilled profile (not a step payload) is revealed to the user.
-        assert sent_texts(send)[-1] == bot_gateway.PROFILE_REVEAL_TEMPLATE.format(
+        # The distilled profile (not a step payload) is revealed to the user,
+        # and the ceiling route reaches the Converter like every other finish.
+        assert sent_texts(send)[-2] == bot_gateway.PROFILE_REVEAL_TEMPLATE.format(
             profile=DISTILLED_PROFILE.profile,
             animal=DISTILLED_PROFILE.suggested_animal,
             animal_description=DISTILLED_PROFILE.animal_description,
         )
-        assert "A lone hunter of the small hours." in sent_texts(send)[-1]
+        assert "A lone hunter of the small hours." in sent_texts(send)[-2]
+        assert sent_texts(send)[-1] == bot_gateway.PORTRAIT_HOLD_MSG
 
 
 class TestNonTextInput:

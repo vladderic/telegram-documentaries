@@ -63,6 +63,85 @@ class GeminiClient:
         return text.replace(self.api_key, REDACTED)
 
     @log_async_call(logger)
+    async def _call(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST one generateContent request; return the decoded JSON body.
+
+        Owns the auth header (never a URL, so the key can never leak into an
+        error message), the sanitised typed error handling and the response
+        decoding. Callers differ only in their payload and their parse.
+
+        Raises:
+            GeminiApiError: On transport/HTTP failures or a body that is not a
+                JSON object. The API key is redacted from every message.
+        """
+        # Auth travels as a header so it can never leak into a URL-bearing
+        # error message (mirrors the Telegram client's token hygiene).
+        headers = {"x-goog-api-key": self.api_key}
+        try:
+            response = await self._client.post(
+                generate_url(self.model), json=payload, headers=headers
+            )
+        except httpx.HTTPError as exc:
+            detail = self._sanitize(str(exc))
+            # `from None`: chaining would re-print the original exception,
+            # whose message could embed request details, into log output.
+            raise GeminiApiError(
+                f"Gemini API call failed ({type(exc).__name__}): {detail}"
+            ) from None
+        if response.is_error:
+            body = self._sanitize(response.text[:300])
+            raise GeminiApiError(
+                f"Gemini API returned HTTP {response.status_code}: {body}"
+            ) from None
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise GeminiApiError(
+                f"Gemini API returned an unexpected response shape "
+                f"({type(exc).__name__})"
+            ) from None
+        if not isinstance(data, dict):
+            raise GeminiApiError(
+                "Gemini API returned an unexpected response shape (not a JSON object)"
+            )
+        return data
+
+    async def generate_image(
+        self,
+        contents: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Run one image-generation call and return the response parts.
+
+        Args:
+            contents: Gemini ``contents`` array (prompt text, inline media).
+
+        Returns:
+            The response parts (unvalidated - the caller finds and validates
+            the inline image part).
+
+        Raises:
+            GeminiApiError: On transport/HTTP failures or a response with no
+                candidate parts. The API key is redacted from every message.
+        """
+        data = await self._call(
+            {
+                "contents": contents,
+                "generationConfig": {"responseModalities": ["IMAGE"]},
+            }
+        )
+        try:
+            parts = data["candidates"][0]["content"]["parts"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise GeminiApiError(
+                f"Gemini API returned an unexpected response shape "
+                f"({type(exc).__name__})"
+            ) from None
+        if not isinstance(parts, list) or not parts:
+            raise GeminiApiError(
+                "Gemini API returned an unexpected response shape (no parts)"
+            )
+        return parts
+
     async def generate(
         self,
         contents: list[dict[str, Any]],
@@ -90,28 +169,9 @@ class GeminiClient:
                 "responseSchema": schema,
             },
         }
-        # Auth travels as a header so it can never leak into a URL-bearing
-        # error message (mirrors the Telegram client's token hygiene).
-        headers = {"x-goog-api-key": self.api_key}
-        try:
-            response = await self._client.post(
-                generate_url(self.model), json=payload, headers=headers
-            )
-        except httpx.HTTPError as exc:
-            detail = self._sanitize(str(exc))
-            # `from None`: chaining would re-print the original exception,
-            # whose message could embed request details, into log output.
-            raise GeminiApiError(
-                f"Gemini API call failed ({type(exc).__name__}): {detail}"
-            ) from None
-        if response.is_error:
-            body = self._sanitize(response.text[:300])
-            raise GeminiApiError(
-                f"Gemini API returned HTTP {response.status_code}: {body}"
-            ) from None
+        data = await self._call(payload)
 
         try:
-            data = response.json()
             text = data["candidates"][0]["content"]["parts"][0]["text"]
             decoded = json.loads(text)
         except (KeyError, IndexError, TypeError, ValueError) as exc:
