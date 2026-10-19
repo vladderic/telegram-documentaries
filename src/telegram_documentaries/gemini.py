@@ -146,12 +146,18 @@ class GeminiClient:
         self,
         contents: list[dict[str, Any]],
         schema: dict[str, Any],
+        *,
+        system_instruction: str | None = None,
     ) -> dict[str, Any]:
         """Run one structured-output call and return the decoded JSON object.
 
         Args:
             contents: Gemini ``contents`` array (prompt text, inline media).
             schema: JSON schema the model must conform to.
+            system_instruction: Optional role/behaviour instruction, sent in the
+                dedicated ``systemInstruction`` field so the user turn carries
+                only the task input. Omitted from the body when ``None`` (the
+                API is never sent an empty instruction).
 
         Returns:
             The decoded JSON object (unvalidated - the caller parses it into
@@ -162,13 +168,15 @@ class GeminiClient:
                 does not contain a JSON object. The API key is redacted from
                 every message.
         """
-        payload = {
+        payload: dict[str, Any] = {
             "contents": contents,
             "generationConfig": {
                 "responseMimeType": "application/json",
                 "responseSchema": schema,
             },
         }
+        if system_instruction is not None:
+            payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         data = await self._call(payload)
 
         try:
