@@ -373,3 +373,96 @@ class TestGenerateAudio:
                 await client.generate_audio("text", voice="Charon")
         finally:
             await client.close()
+
+    @pytest.mark.asyncio
+    async def test_finds_the_audio_after_a_leading_text_part(self) -> None:
+        """The model may prepend a text part; the audio need not be parts[0]."""
+        response = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {"text": "One moment."},
+                            {
+                                "inlineData": {
+                                    "mimeType": "audio/l16; rate=24000; channels=1",
+                                    "data": "cGxhY2Vob2xkZXI=",
+                                }
+                            },
+                        ],
+                    },
+                    "finishReason": "STOP",
+                }
+            ]
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=response)
+
+        client = make_client(handler)
+        try:
+            audio = await client.generate_audio("text", voice="Charon")
+        finally:
+            await client.close()
+
+        assert audio.data == "cGxhY2Vob2xkZXI="
+        assert audio.mime_type == "audio/l16; rate=24000; channels=1"
+
+    @pytest.mark.asyncio
+    async def test_accepts_the_snake_case_part_spelling(self) -> None:
+        """Casing tolerance: requests are snake_case, the live API camelCase."""
+        response = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {
+                                "inline_data": {
+                                    "mime_type": "audio/l16; rate=24000; channels=1",
+                                    "data": "cGxhY2Vob2xkZXI=",
+                                }
+                            }
+                        ],
+                    },
+                    "finishReason": "STOP",
+                }
+            ]
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=response)
+
+        client = make_client(handler)
+        try:
+            audio = await client.generate_audio("text", voice="Charon")
+        finally:
+            await client.close()
+
+        assert audio.data == "cGxhY2Vob2xkZXI="
+        assert audio.mime_type == "audio/l16; rate=24000; channels=1"
+
+    @pytest.mark.asyncio
+    async def test_an_inline_part_with_missing_fields_is_rejected(self) -> None:
+        response = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [{"inlineData": {"mimeType": "audio/l16"}}],
+                    },
+                    "finishReason": "STOP",
+                }
+            ]
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=response)
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(GeminiApiError):
+                await client.generate_audio("text", voice="Charon")
+        finally:
+            await client.close()
