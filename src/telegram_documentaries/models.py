@@ -6,6 +6,8 @@ at the boundary (TECH.md). Never pass raw dicts across module boundaries.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from enum import StrEnum
 from typing import Annotated, Any
 
@@ -270,6 +272,52 @@ class BehaviouralProfile(BaseModel):
         if not isinstance(v, str) or not v.strip():
             raise ValueError(f"{info.field_name} must be a non-empty string")
         return v.strip()
+
+
+class GeneratedImage(BaseModel):
+    """The Converter's output: one image, ready to upload to Telegram.
+
+    The Gemini response carries the bytes base64-encoded; they are decoded here,
+    at the boundary, so no base64 text ever travels past it.
+    """
+
+    mime_type: str
+    data: bytes
+
+    model_config = {
+        "extra": "ignore",
+    }
+
+    @field_validator("mime_type")
+    @classmethod
+    def validate_mime_type(cls, v: str) -> str:
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError("mime_type must be a non-empty string")
+        mime = v.strip().lower()
+        if not mime.startswith("image/"):
+            raise ValueError("mime_type must be an image type")
+        return mime
+
+    @field_validator("data", mode="before")
+    @classmethod
+    def decode_data(cls, v: Any) -> bytes:
+        if isinstance(v, str):
+            try:
+                v = base64.b64decode(v, validate=True)
+            except (binascii.Error, ValueError):
+                raise ValueError("data must be valid base64") from None
+        if not isinstance(v, bytes) or not v:
+            raise ValueError("data must be non-empty bytes")
+        return v
+
+    @classmethod
+    def from_base64(cls, mime_type: str, data: str) -> GeneratedImage:
+        """Build an image from the wire form (base64 text, as Gemini sends it).
+
+        The decode rules live in the validator above and nowhere else; this is
+        only the type-honest door for base64 callers.
+        """
+        return cls.model_validate({"mime_type": mime_type, "data": data})
 
 
 class InterviewState(BaseModel):
