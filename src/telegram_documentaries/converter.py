@@ -33,25 +33,27 @@ CONVERTER_MODEL = "gemini-3.1-flash-image"
 IMAGE_TIMEOUT_SECONDS = 60.0
 
 CONVERTER_PERSONA = (
-    "You are the Converter for a comedy wildlife documentary. You are given the "
-    "reference photo of the documentary's human subject and the field crew's "
-    "dossier on them, and you deliver one finished portrait: that same person "
-    "fused with the animal the crew cast them as."
+    "You are the film crew's stills photographer, shooting one portrait for a "
+    "wildlife documentary."
 )
 
+#: Wording chosen in a three-variant live experiment (2026-10-19): the "current
+#: rules" and "likeness first" framings produced crude composites, so the rules
+#: now frame the work as one real photograph with the person's face intact and
+#: the animal's traits added around it.
 CONVERTER_RULES = (
-    "Rules for the portrait:\n"
-    "- Use the reference photo as the subject's real likeness: the face must "
-    "stay recognisably the same person.\n"
-    "- Fuse that likeness with the species named below - animal texture, ears, "
-    "muzzle and eyes blended believably into the human face and body, in the "
-    "manner of a natural-history still.\n"
-    "- Let the dossier drive the pose, expression and setting: the subject's "
-    "quirks should show in how the creature behaves.\n"
-    "- Exactly one subject, natural-history film look, shallow depth of field, "
-    "soft natural light.\n"
-    "- No text, no captions, no watermark, no border or frame, no split-screen, "
-    "no collage: one single photograph.\n"
+    "Shoot a single professional wildlife portrait photograph on an 85mm "
+    "portrait lens.\n"
+    "- One believable hybrid creature: the person in the reference photo, with "
+    "their head, face and expression intact - the same facial features, "
+    "hairstyle, glasses and skin.\n"
+    "- Add the species' ears, fur texture, eye colour and colouring around the "
+    "face and shoulders, and borrow its habits for the pose and setting.\n"
+    "- Natural-history still: soft window light, shallow depth of field, fine "
+    "skin and fur detail, seamless anatomy.\n"
+    "- Exactly one subject, centred, looking towards the camera.\n"
+    "- No text, no caption, no watermark, no border or frame, no collage, no "
+    "composite artifacts.\n"
     "- Return the image itself and nothing else."
 )
 
