@@ -60,10 +60,15 @@ python -m telegram_documentaries
 
 It long-polls Telegram (`getUpdates`) and runs the three stages built so far:
 
-1. **Bouncer** — any text or non-photo input gets an in-character nudge to send
-   a photograph; a photo gets an immediate hold-line and is then judged by
-   Gemini vision (accept → the photo is stored under `.tmp/` and the session
+1. **Bouncer** — any text or non-portrait input gets an in-character nudge to
+   send a photograph; a portrait gets an immediate hold-line and is then judged
+   by Gemini vision (accept → it is stored under `.tmp/` and the session
    advances; reject → a specific in-character quip and a clean retry).
+   A portrait may be sent as a normal photo **or as a file** — Telegram
+   compresses photos, so sending the image as a file keeps its original
+   resolution and gives the Converter more to work with. Either way the cap is
+   10 MB and only files explicitly typed as an image count (a PDF, or a file
+   with no media type, gets the same nudge as text).
 2. **Interviewer** — an accepted photo gets a short confirmation and the first
    of 5–7 interview questions, one per message, adapted to the answers given
    so far. A message queued *before* the pending question went out is nudged
@@ -72,9 +77,11 @@ It long-polls Telegram (`getUpdates`) and runs the three stages built so far:
    a bare species name, and a one-line description of it.
 3. **Converter** — the stored portrait and the dossier go to Gemini image
    generation (after a "darkroom" hold line, since generation takes seconds)
-   and the hybrid portrait comes back as a captioned photo. If generation, the
-   upload or reading the stored photo fails, the bot says so in character and
-   the session stays put — no crash, no partial state.
+   and the hybrid portrait comes back as a captioned photo. The stored bytes
+   are handed over unmodified, together with the media type they were uploaded
+   with. If generation, the upload or reading the stored portrait fails, the
+   bot says so in character and the session stays put — no crash, no partial
+   state.
 
 Shut down gracefully with **Ctrl+C** or **SIGTERM** — even while a long poll is
 in flight. Sessions live in memory only, so a restart means a fresh photo.
