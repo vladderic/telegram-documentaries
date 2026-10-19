@@ -829,9 +829,12 @@ async def _handle_portrait(
     # Which upload kind arrived decides the source resolution, so it belongs in
     # the log: live validation reads it back (Phase 4b).
     logger.info(
-        "portrait_received chat_id=%s kind=%s mime=%s declared_bytes=%s",
+        "portrait_received chat_id=%s kind=%s has_photo=%s has_document=%s "
+        "mime=%s declared_bytes=%s",
         chat_id,
         portrait.kind,
+        message.photo is not None,
+        message.document is not None,
         portrait.mime_type,
         portrait.file_size,
     )

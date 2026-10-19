@@ -416,6 +416,9 @@ class TestDocumentPortrait:
         assert len(received) == 1
         assert "kind=document" in received[0]
         assert "mime=image/png" in received[0]
+        # Both raw flags are logged, so "photo wins" can never hide a file.
+        assert "has_document=True" in received[0]
+        assert "has_photo=False" in received[0]
 
     @pytest.mark.asyncio
     async def test_a_file_portrait_is_accepted_stored_and_passed_on_truthfully(
