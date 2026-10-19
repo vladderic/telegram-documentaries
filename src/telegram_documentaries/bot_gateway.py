@@ -164,7 +164,7 @@ class TelegramApiError(Exception):
     """A Telegram API call failed. The message never contains the bot token."""
 
 
-_PHOTO_FILENAMES = {
+_UPLOAD_FILENAMES = {
     "image/jpeg": "portrait.jpg",
     "image/jpg": "portrait.jpg",
     "image/png": "portrait.png",
@@ -173,9 +173,9 @@ _PHOTO_FILENAMES = {
 }
 
 
-def _photo_filename(mime_type: str) -> str:
+def _upload_filename(mime_type: str) -> str:
     """Pick an upload filename from the image's media type (Telegram needs one)."""
-    return _PHOTO_FILENAMES.get(mime_type, "portrait.jpg")
+    return _UPLOAD_FILENAMES.get(mime_type, "portrait.jpg")
 
 
 class TelegramClient:
@@ -382,7 +382,7 @@ class TelegramClient:
             form={"chat_id": str(chat_id), "caption": caption},
             files={
                 "photo": (
-                    _photo_filename(image.mime_type),
+                    _upload_filename(image.mime_type),
                     image.data,
                     image.mime_type,
                 )
@@ -590,7 +590,7 @@ async def _deliver_portrait(
     stored_path = session.photo_local_path
     try:
         if not stored_path:
-            # Only reachable if a finish route ran without a stored photo.
+            # Only reachable if a finish route ran without a stored portrait.
             raise FileNotFoundError("session has no stored portrait path")
         portrait = Path(stored_path).read_bytes()
     except OSError:
@@ -763,7 +763,10 @@ async def _handle_interview(
         message: The incoming message (its text and timestamp are used).
     """
     chat_id = session.chat_id
-    answer = "" if message.photo else (message.text or "").strip()
+    # A portrait (photo or image file) is never an answer, and neither is a
+    # caption: only ``text`` counts (Phase 4b, same predicate as the router).
+    portrait = bouncer.portrait_source(message) is not None
+    answer = "" if portrait else (message.text or "").strip()
 
     if not answer:
         pending = session.interview.pending_question
