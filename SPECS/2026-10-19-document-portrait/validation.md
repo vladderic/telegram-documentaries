@@ -58,19 +58,25 @@ scripts; live checks need real Telegram traffic against the running bot.
 - [x] The upload kind is now observable in the log at all: this was the gap that
       made the first attempt ambiguous (a JPEG file and a compressed photo both
       stored as `portrait.jpg`), fixed in `e9bc08d`.
-- [ ] An **accepted** file portrait → hold line → verdict → interview opens; the
-      log shows `kind=document` and the stored file is `portrait.<ext>`.
-- [ ] Interview finished → portrait generated; the log shows `converter_fuse`
-      with the document's media type and a **larger** stored source than the
-      compressed-photo run (`portrait_bytes` comparison recorded).
-- [ ] A PDF gets the photo nudge; an oversize image file gets the too-large line
-      with no `getFile` in the log.
-- [ ] A normal photo behaves exactly as before (regression check).
-- [ ] Quality note recorded honestly: how much did the full-resolution source
-      actually help the fusion? (The model's ceiling remains; the Phase 4 prompt
-      is variant B, "same rules + realism".) `converter_fuse portrait_bytes`
-      gives the comparison: 150646 for the compressed photo (12:19) vs the
-      document's own size for a file upload.
-- [ ] Docs updated: README (upload section, 10 MB cap), ROADMAP (Phase 4b
+- [~] An **accepted** file portrait completing the interview → **deferred by the
+      user (2026-10-19)**: the accept→interview→fusion chain for a document is
+      covered by the automated flow test (hold line → one vision call →
+      verdict → stored → five answers → `send_photo`) and was proven live up to
+      the verdict; only the happy-path half with a real file was not repeated
+      live. The gate rejected the file used for the live check, which is itself
+      correct behaviour (`NOT_A_REAL_PHOTO`, a cartoon).
+- [~] A PDF gets the photo nudge; an oversize image file gets the too-large line
+      with no `getFile` in the log → **automated only** (both are asserted with
+      mocked transport; no live PDF was sent).
+- [x] A normal photo behaves exactly as before: live runs at 12:19, 13:38 and
+      14:21 all show the compressed-photo route unchanged (verdict, interview,
+      conversion, holding reply).
+- [~] Quality note: **not measurable yet** — no live run has used a
+      full-resolution *portrait* file. What is recorded: the same picture
+      arrived as 245840 bytes (photo) and 592016 bytes (file), so a file upload
+      genuinely carries more of the original; `converter_fuse portrait_bytes`
+      is the metric to compare (150646 for the 12:19 compressed run). The model's
+      quality ceiling is unchanged; Phase 4's prompt is variant B.
+- [x] Docs updated: README (upload section, 10 MB cap), ROADMAP (Phase 4b
       entry), this file. `TECH.md` needs no edit: its session-state notes are
       phase-level, not field-level.
