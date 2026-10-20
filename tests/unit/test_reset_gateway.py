@@ -1019,3 +1019,75 @@ class TestFullLoop:
             record.getMessage() == "Starting Telegram gateway (Phase 7 - Resilience)"
             for record in caplog.records
         )
+
+
+def sent_payload(message_id: int) -> dict[str, Any]:
+    """A minimal but realistic Telegram ``send*`` payload with a message ID."""
+    return {"ok": True, "result": {"message_id": message_id, "date": 1}}
+
+
+class TestSentMessageRecording:
+    """Phase 7 chat-clear slice: every send records its message ID."""
+
+    async def test_send_message_records_the_returned_id(self) -> None:
+        session = SessionState(chat_id=CHAT_ID)
+        client = new_client()
+        client.send_message = AsyncMock(return_value=sent_payload(7001))
+
+        sent = await bot_gateway._send(client, session, "A line of narration")
+
+        assert sent is True
+        assert session.sent_message_ids == [7001]
+
+    async def test_the_id_records_in_send_order(self) -> None:
+        session = SessionState(chat_id=CHAT_ID)
+        client = new_client()
+        client.send_message = AsyncMock(
+            side_effect=[sent_payload(10), sent_payload(20), sent_payload(30)]
+        )
+
+        for _ in range(3):
+            await bot_gateway._send(client, session, "line")
+
+        assert session.sent_message_ids == [10, 20, 30]
+
+    async def test_a_failed_send_records_nothing(self) -> None:
+        session = SessionState(chat_id=CHAT_ID)
+        client = new_client()
+        client.send_message = AsyncMock(side_effect=RuntimeError("network down"))
+
+        sent = await bot_gateway._send(client, session, "never delivered")
+
+        assert sent is False
+        assert session.sent_message_ids == []
+
+    async def test_a_payload_without_a_message_id_records_nothing(self) -> None:
+        """A 200 that somehow lacks ``result.message_id`` must not plant junk."""
+        session = SessionState(chat_id=CHAT_ID)
+        client = new_client()
+        client.send_message = AsyncMock(return_value={"ok": True})
+
+        await bot_gateway._send(client, session, "odd payload")
+
+        assert session.sent_message_ids == []
+
+    async def test_photo_send_records_the_returned_id(self, tmp_path: Path) -> None:
+        session = running_session(CHAT_ID, Phase.CONVERT, tmp_path / "555")
+        client = new_client()
+        client.send_message = AsyncMock(return_value=sent_payload(1))
+        client.send_photo = AsyncMock(return_value=sent_payload(5100))
+
+        await bot_gateway._deliver_portrait(
+            client, cast(Any, FakeConverter()), session, PROFILE
+        )
+
+        assert 5100 in session.sent_message_ids
+
+    async def test_voice_send_records_the_returned_id(self) -> None:
+        session = SessionState(chat_id=CHAT_ID, script_text="The subject stirs.")
+        client = new_client()
+        client.send_voice = AsyncMock(return_value=sent_payload(9100))
+
+        await bot_gateway._narrate(client, cast(Any, FakeNarrator()), session)
+
+        assert 9100 in session.sent_message_ids
