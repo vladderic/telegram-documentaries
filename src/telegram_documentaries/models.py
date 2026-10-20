@@ -437,10 +437,11 @@ class InterviewState(BaseModel):
 class SessionState(BaseModel):
     """Typed per-chat_id session state.
 
-    The schema is versioned; this is v1.3 (adds the Phase 6 voice-note flag).
-    Contains the current phase, any stored photo reference (file_id and local
-    path as stored), the interview progress, the narration once written, and
-    provides a clear operation to reset state.
+    The schema is versioned; this is v1.4 (adds the Phase 7 tracked-message
+    IDs). Contains the current phase, any stored photo reference (file_id and
+    local path as stored), the interview progress, the narration once written,
+    the IDs of the messages the bot has sent to this chat, and provides a
+    clear operation to reset state.
     """
 
     chat_id: int
@@ -461,6 +462,11 @@ class SessionState(BaseModel):
     #: one narration means exactly one voice note, no matter how many late
     #: messages arrive.
     voice_note_sent: bool = False
+    #: IDs of the messages the bot itself has sent to this chat (Phase 7
+    #: chat-clear slice). A reset deletes them so the bot's side of the
+    #: conversation is cleared. In memory only (MISSION: no persistence), so
+    #: messages from before a restart are untracked and cannot be deleted.
+    sent_message_ids: list[int] = Field(default_factory=list)
 
     model_config = {
         "extra": "ignore",
@@ -476,6 +482,7 @@ class SessionState(BaseModel):
         self.temp_media_path = None
         self.script_text = None
         self.voice_note_sent = False
+        self.sent_message_ids = []
         self.interview = InterviewState()
 
     def to_dict(self) -> dict[str, Any]:

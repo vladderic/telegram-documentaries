@@ -125,6 +125,17 @@ at-wrong-stage guards across all phases, API-timeout fallbacks.
   or a portrait nudge; the gateway banner reads `(Phase 7 - Resilience)`.
   Timeout fallbacks and wrong-payload-at-wrong-stage guards remain pending
   (separate Phase 7 slices).
+- **Implementation (chat-clear slice, `2026-10-20`):** every outbound message ID
+  is tracked on `SessionState.sent_message_ids` (`models.py`, schema v1.4), and
+  `TelegramClient.delete_message` (`bot_gateway.py`) plus the best-effort
+  `_delete_sent_messages` helper make `/start` / `/restart` delete the bot's own
+  messages before clearing the session (`chat_clear chat_id=… deleted=… of=…`).
+  The user's own messages cannot be deleted (Telegram platform limit), so they
+  remain; only IDs tracked on the current in-memory session are removed. A
+  failed deletion is logged loudly and skipped - the reset still completes. The
+  reset reply is sent last and is itself tracked, so a second reset deletes it.
+  (reset slice and chat-clear slice complete; timeout & wrong-payload slices
+  pending)
 - **Serves:** reset + out-of-order success criteria.
 
 ## Phase 8 — Deployment (zero-cost only)
@@ -156,5 +167,5 @@ OOM kill, box restart) never leaves it silently offline.
 | 4 — Converter | Complete |
 | 5 — Scripter | Complete |
 | 6 — Narrator | Complete |
-| 7 — Resilience | In progress — reset slice (`/start` / `/restart`) complete; timeout & wrong-payload slices pending |
+| 7 — Resilience | In progress — reset + chat-clear slices (`/start` / `/restart`) complete; timeout & wrong-payload slices pending |
 | 8 — Deployment (zero-cost) | Not started |

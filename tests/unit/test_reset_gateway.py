@@ -9,6 +9,7 @@ style of ``test_scripter_gateway.py``. All secrets are placeholders.
 
 from __future__ import annotations
 
+import itertools
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -289,6 +290,8 @@ def assert_session_cleared(session: SessionState) -> None:
     assert session.interview.pending_question is None
     assert session.interview.profile is None
     assert session.interview.question_sent_at is None
+    # ``sent_message_ids`` is NOT asserted here: after a reset the session
+    # legitimately tracks the reset reply (so the next reset deletes it).
 
 
 class TestResetCopy:
@@ -303,6 +306,80 @@ class TestResetCopy:
         """Every other ``*_MSG`` constant uses " - ", never an em dash."""
         assert " - " in bot_gateway.RESET_CONFIRM_MSG
         assert "—" not in bot_gateway.RESET_REPLY
+
+
+class TestDeleteSentMessages:
+    """Phase 7 chat-clear slice: best-effort deletion of the bot's messages."""
+
+    async def test_deletes_every_tracked_id_and_returns_counts(self) -> None:
+        session = SessionState(chat_id=CHAT_ID, sent_message_ids=[10, 11, 12])
+        client = new_client()
+
+        deleted, attempted = await bot_gateway._delete_sent_messages(client, session)
+
+        assert (deleted, attempted) == (3, 3)
+        assert [
+            c.kwargs["message_id"] for c in client.delete_message.await_args_list
+        ] == [
+            10,
+            11,
+            12,
+        ]
+        assert all(
+            c.kwargs["chat_id"] == CHAT_ID
+            for c in client.delete_message.await_args_list
+        )
+
+    async def test_a_failure_on_one_id_does_not_stop_the_others(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = SessionState(chat_id=CHAT_ID, sent_message_ids=[10, 11, 12])
+        client = new_client()
+
+        async def flaky(chat_id: int, message_id: int) -> None:
+            if message_id == 11:
+                raise bot_gateway.TelegramApiError("message to delete not found")
+
+        client.delete_message = AsyncMock(side_effect=flaky)
+
+        with caplog.at_level(logging.WARNING):
+            deleted, attempted = await bot_gateway._delete_sent_messages(
+                client, session
+            )
+
+        assert (deleted, attempted) == (2, 3)
+        assert "failed to delete" in caplog.text
+        assert "11" in caplog.text
+        # The other two were still attempted.
+        assert client.delete_message.await_count == 3
+
+    async def test_a_brand_new_chat_deletes_nothing(self) -> None:
+        session = SessionState(chat_id=CHAT_ID)
+        client = new_client()
+
+        deleted, attempted = await bot_gateway._delete_sent_messages(client, session)
+
+        assert (deleted, attempted) == (0, 0)
+        client.delete_message.assert_not_awaited()
+
+    async def test_it_never_raises_and_leaks_no_secrets(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = SessionState(chat_id=CHAT_ID, sent_message_ids=[10])
+        client = new_client()
+        client.delete_message = AsyncMock(
+            side_effect=bot_gateway.TelegramApiError(
+                f"Telegram API deleteMessage failed: {PLACEHOLDER_TOKEN}"
+            )
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            deleted, attempted = await bot_gateway._delete_sent_messages(
+                client, session
+            )
+
+        assert (deleted, attempted) == (0, 1)
+        assert PLACEHOLDER_TOKEN not in caplog.text
 
 
 class TestFirstContactAndAliases:
@@ -842,6 +919,7 @@ async def run_updates(
     vision: AsyncMock | None = None,
     send_photo: AsyncMock | None = None,
     send_voice: AsyncMock | None = None,
+    delete_message: AsyncMock | None = None,
 ) -> None:
     """Run ``run_bot`` with every external dependency mocked (scripter harness)."""
     mock_client = AsyncMock()
@@ -849,6 +927,7 @@ async def run_updates(
     mock_client.send_message = send
     mock_client.send_photo = send_photo or AsyncMock(return_value={"ok": True})
     mock_client.send_voice = send_voice or AsyncMock(return_value={"ok": True})
+    mock_client.delete_message = delete_message or AsyncMock(return_value=True)
     mock_client.download_file = AsyncMock(return_value=PORTRAIT_BYTES)
     mock_client.close = AsyncMock()
 
@@ -927,6 +1006,57 @@ class TestFullLoop:
         ]
         assert starts == ["Starting Telegram gateway (Phase 7 - Resilience)"]
 
+    async def test_a_full_run_then_restart_deletes_every_bot_message(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The TA chat-clear scenario end to end, at mock level: a whole run,
+        then ``/restart`` deletes every message the bot posted in that run."""
+        interviewer = RecordingInterviewer(
+            questions=[f"Q{n}?" for n in range(1, 8)],
+            steps=[
+                InterviewStep(action=InterviewAction.FINISH, **PROFILE.model_dump()),
+            ],
+        )
+        next_id = itertools.count(1000)
+        send = AsyncMock(side_effect=lambda **_: sent_payload(next(next_id)))
+        send_photo = AsyncMock(side_effect=lambda **_: sent_payload(next(next_id)))
+        send_voice = AsyncMock(side_effect=lambda **_: sent_payload(next(next_id)))
+        delete_message = AsyncMock(return_value=True)
+        updates = [
+            [photo_update(1)],
+            [text_update(n, CHAT_ID, f"A{n}") for n in range(2, 9)],
+            [command_update(9, text="/restart")],
+        ]
+
+        with caplog.at_level(logging.INFO):
+            await run_updates(
+                updates,
+                send=send,
+                media_root=str(tmp_path),
+                interviewer=interviewer,
+                send_photo=send_photo,
+                send_voice=send_voice,
+                delete_message=delete_message,
+            )
+
+        # Every bot message sent in the run was deleted on the reset, and the
+        # reset reply itself was NOT deleted (it is tracked for the next reset).
+        deleted_ids = {
+            call.kwargs["message_id"] for call in delete_message.await_args_list
+        }
+        assert deleted_ids
+        reply_calls = [
+            call
+            for call in send.await_args_list
+            if call.kwargs["text"] == EXPECTED_REPLY
+        ]
+        assert len(reply_calls) == 1
+        # Delete happened before the reply was sent (mock call order).
+        delete_message.assert_awaited()
+        assert any(
+            "chat_clear chat_id=555" in record.getMessage() for record in caplog.records
+        )
+
     async def test_the_banner_names_phase_7(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -944,3 +1074,242 @@ class TestFullLoop:
             record.getMessage() == "Starting Telegram gateway (Phase 7 - Resilience)"
             for record in caplog.records
         )
+
+
+def sent_payload(message_id: int) -> dict[str, Any]:
+    """A minimal but realistic Telegram ``send*`` payload with a message ID."""
+    return {"ok": True, "result": {"message_id": message_id, "date": 1}}
+
+
+class TestSentMessageRecording:
+    """Phase 7 chat-clear slice: every send records its message ID."""
+
+    async def test_send_message_records_the_returned_id(self) -> None:
+        session = SessionState(chat_id=CHAT_ID)
+        client = new_client()
+        client.send_message = AsyncMock(return_value=sent_payload(7001))
+
+        sent = await bot_gateway._send(client, session, "A line of narration")
+
+        assert sent is True
+        assert session.sent_message_ids == [7001]
+
+    async def test_the_id_records_in_send_order(self) -> None:
+        session = SessionState(chat_id=CHAT_ID)
+        client = new_client()
+        client.send_message = AsyncMock(
+            side_effect=[sent_payload(10), sent_payload(20), sent_payload(30)]
+        )
+
+        for _ in range(3):
+            await bot_gateway._send(client, session, "line")
+
+        assert session.sent_message_ids == [10, 20, 30]
+
+    async def test_a_failed_send_records_nothing(self) -> None:
+        session = SessionState(chat_id=CHAT_ID)
+        client = new_client()
+        client.send_message = AsyncMock(side_effect=RuntimeError("network down"))
+
+        sent = await bot_gateway._send(client, session, "never delivered")
+
+        assert sent is False
+        assert session.sent_message_ids == []
+
+    async def test_a_payload_without_a_message_id_records_nothing(self) -> None:
+        """A 200 that somehow lacks ``result.message_id`` must not plant junk."""
+        session = SessionState(chat_id=CHAT_ID)
+        client = new_client()
+        client.send_message = AsyncMock(return_value={"ok": True})
+
+        await bot_gateway._send(client, session, "odd payload")
+
+        assert session.sent_message_ids == []
+
+    async def test_photo_send_records_the_returned_id(self, tmp_path: Path) -> None:
+        session = running_session(CHAT_ID, Phase.CONVERT, tmp_path / "555")
+        client = new_client()
+        client.send_message = AsyncMock(return_value=sent_payload(1))
+        client.send_photo = AsyncMock(return_value=sent_payload(5100))
+
+        await bot_gateway._deliver_portrait(
+            client, cast(Any, FakeConverter()), session, PROFILE
+        )
+
+        assert 5100 in session.sent_message_ids
+
+    async def test_voice_send_records_the_returned_id(self) -> None:
+        session = SessionState(chat_id=CHAT_ID, script_text="The subject stirs.")
+        client = new_client()
+        client.send_voice = AsyncMock(return_value=sent_payload(9100))
+
+        await bot_gateway._narrate(client, cast(Any, FakeNarrator()), session)
+
+        assert 9100 in session.sent_message_ids
+
+
+class TestChatClear:
+    """Phase 7 chat-clear slice: reset deletes the bot's own messages."""
+
+    async def test_reset_deletes_every_tracked_message(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = running_session(CHAT_ID, Phase.DONE, tmp_path / str(CHAT_ID))
+        session.sent_message_ids = [101, 102, 103]
+        sessions = {CHAT_ID: session}
+        client = new_client()
+        client.send_message = AsyncMock(return_value=sent_payload(999))
+
+        with caplog.at_level(logging.INFO):
+            await dispatch(
+                command_update(1, text="/restart"),
+                sessions=sessions,
+                media_root=tmp_path,
+                client=client,
+            )
+
+        deleted = [
+            call.kwargs["message_id"] for call in client.delete_message.await_args_list
+        ]
+        assert deleted == [101, 102, 103]
+        assert all(
+            call.kwargs["chat_id"] == CHAT_ID
+            for call in client.delete_message.await_args_list
+        )
+        assert any(
+            "chat_clear chat_id=555 deleted=3 of=3" in record.getMessage()
+            for record in caplog.records
+        )
+
+    async def test_the_reset_reply_is_sent_after_deletion_and_kept(
+        self, tmp_path: Path
+    ) -> None:
+        session = running_session(CHAT_ID, Phase.DONE, tmp_path / str(CHAT_ID))
+        session.sent_message_ids = [101, 102]
+        sessions = {CHAT_ID: session}
+        client = new_client()
+        client.send_message = AsyncMock(return_value=sent_payload(999))
+
+        await dispatch(
+            command_update(1, text="/restart"),
+            sessions=sessions,
+            media_root=tmp_path,
+            client=client,
+        )
+
+        # The reply (999) is NOT among the deleted IDs...
+        deleted = [
+            call.kwargs["message_id"] for call in client.delete_message.await_args_list
+        ]
+        assert 999 not in deleted
+        # ...it is tracked, so the NEXT reset will delete it.
+        assert session.sent_message_ids == [999]
+
+    async def test_a_repeat_reset_deletes_the_previous_reset_reply(
+        self, tmp_path: Path
+    ) -> None:
+        session = running_session(CHAT_ID, Phase.DONE, tmp_path / str(CHAT_ID))
+        session.sent_message_ids = [101]
+        sessions = {CHAT_ID: session}
+        client = new_client()
+        client.send_message = AsyncMock(
+            side_effect=[sent_payload(500), sent_payload(501)]
+        )
+
+        await dispatch(
+            command_update(1, text="/restart"),
+            sessions=sessions,
+            media_root=tmp_path,
+            client=client,
+        )
+        client.delete_message.reset_mock()
+        await dispatch(
+            command_update(2, text="/restart"),
+            sessions=sessions,
+            media_root=tmp_path,
+            client=client,
+        )
+
+        # First reset deleted 101; second reset deleted 500 (the first reply).
+        assert [
+            call.kwargs["message_id"] for call in client.delete_message.await_args_list
+        ] == [500]
+        assert session.sent_message_ids == [501]
+
+    async def test_one_delete_failure_still_clears_and_replies(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = running_session(CHAT_ID, Phase.DONE, tmp_path / str(CHAT_ID))
+        session.sent_message_ids = [101, 102, 103]
+        sessions = {CHAT_ID: session}
+        client = new_client()
+        client.send_message = AsyncMock(return_value=sent_payload(999))
+
+        async def flaky(chat_id: int, message_id: int) -> None:
+            if message_id == 102:
+                raise bot_gateway.TelegramApiError("message to delete not found")
+
+        client.delete_message = AsyncMock(side_effect=flaky)
+
+        with caplog.at_level(logging.INFO):
+            await dispatch(
+                command_update(1, text="/restart"),
+                sessions=sessions,
+                media_root=tmp_path,
+                client=client,
+            )
+
+        assert client.delete_message.await_count == 3
+        assert_session_cleared(session)
+        assert sent_texts(client)[-1] == EXPECTED_REPLY
+        assert any(
+            "chat_clear chat_id=555 deleted=2 of=3" in record.getMessage()
+            for record in caplog.records
+        )
+        assert any(
+            "failed to delete" in record.getMessage() for record in caplog.records
+        )
+
+    async def test_a_brand_new_chat_deletes_nothing_but_still_replies(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        sessions: dict[int, SessionState] = {}
+        client = new_client()
+        client.send_message = AsyncMock(return_value=sent_payload(1))
+
+        with caplog.at_level(logging.INFO):
+            await dispatch(
+                command_update(1, text="/start"),
+                sessions=sessions,
+                media_root=tmp_path,
+                client=client,
+            )
+
+        client.delete_message.assert_not_awaited()
+        assert sent_texts(client) == [EXPECTED_REPLY]
+        assert any(
+            "chat_clear chat_id=555 deleted=0 of=0" in record.getMessage()
+            for record in caplog.records
+        )
+
+    async def test_the_clear_line_never_logs_message_text_or_secrets(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = running_session(CHAT_ID, Phase.DONE, tmp_path / str(CHAT_ID))
+        session.sent_message_ids = [101]
+        sessions = {CHAT_ID: session}
+        client = new_client()
+        client.send_message = AsyncMock(return_value=sent_payload(999))
+
+        with caplog.at_level(logging.DEBUG):
+            await dispatch(
+                command_update(1, text="/restart"),
+                sessions=sessions,
+                media_root=tmp_path,
+                client=client,
+            )
+
+        assert PLACEHOLDER_TOKEN not in caplog.text
+        assert PLACEHOLDER_GEMINI_KEY not in caplog.text
+        # The narration text the session carried never reaches the log.
+        assert "The subject stirs" not in caplog.text

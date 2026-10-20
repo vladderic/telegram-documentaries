@@ -458,6 +458,29 @@ class TelegramClient:
             },
         )
 
+    async def delete_message(self, chat_id: int, message_id: int) -> None:
+        """Delete one message the bot sent (``deleteMessage``; Phase 7).
+
+        A bot may delete its own messages but not a user's incoming ones, so
+        this is only ever called for IDs the bot recorded when it sent them.
+
+        The call is **never retried**: a retry cannot make an already-gone or
+        too-old message deletable, and the reset is best-effort (a failure is
+        logged and skipped by the caller).
+
+        Args:
+            chat_id: Target chat ID.
+            message_id: ID of the bot's own message to remove.
+
+        Raises:
+            TelegramApiError: On transport/HTTP failures, with the bot token
+                redacted.
+        """
+        await self._request(
+            "deleteMessage",
+            payload={"chat_id": chat_id, "message_id": message_id},
+        )
+
     async def download_file(self, file_id: str) -> bytes:
         """Download a Telegram file's raw bytes (``getFile`` + file fetch).
 
@@ -687,18 +710,81 @@ def purge_chat_media(media_root: str | Path, chat_id: int) -> int:
     return removed
 
 
-async def _send(client: TelegramClient, chat_id: int, text: str) -> bool:
+def _record_sent(session: SessionState, payload: Any) -> None:
+    """Remember a message ID the bot just sent, for the next reset (Phase 7).
+
+    Only a payload that actually carries ``result.message_id`` is recorded; a
+    malformed or failure response records nothing, so a reset can never try to
+    delete a phantom ID.
+    """
+    if not isinstance(payload, dict):
+        return
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return
+    message_id = result.get("message_id")
+    if isinstance(message_id, int):
+        session.sent_message_ids.append(message_id)
+
+
+async def _send(client: TelegramClient, session: SessionState, text: str) -> bool:
     """Send one in-character message, logging (never raising) on failure.
 
     A send failure must not lose the interview: callers only record the
-    question they sent once this returns ``True`` (TECH.md error policy).
+    question they sent once this returns ``True`` (TECH.md error policy). On
+    success the message ID is tracked on the session so a later reset can
+    delete it (Phase 7).
     """
+    chat_id = session.chat_id
     try:
-        await client.send_message(chat_id=chat_id, text=text)
+        payload = await client.send_message(chat_id=chat_id, text=text)
     except Exception:
         logger.exception("failed to send message chat_id=%s", chat_id)
         return False
+    _record_sent(session, payload)
     return True
+
+
+async def _delete_sent_messages(
+    client: TelegramClient,
+    session: SessionState,
+) -> tuple[int, int]:
+    """Delete every message the bot sent to this chat; never raises (Phase 7).
+
+    Best-effort: Telegram only lets a bot delete its own messages, and a
+    message may already be gone or older than the delete window, so a failure
+    on one ID is logged loudly and skipped - the rest are still deleted. The
+    reset must never be blocked by a stuck deletion.
+
+    Args:
+        client: Telegram client.
+        session: The session whose tracked IDs should be removed (not cleared
+            here - the caller clears it after this returns).
+
+    Returns:
+        ``(deleted, attempted)`` - how many of the tracked IDs were removed
+        and how many were tried.
+    """
+    chat_id = session.chat_id
+    deleted = 0
+    attempted = 0
+    for message_id in session.sent_message_ids:
+        attempted += 1
+        try:
+            await client.delete_message(chat_id=chat_id, message_id=message_id)
+        except TelegramApiError as exc:
+            # Log the failure type, never the exception message: the message
+            # can echo an API description, and the conversation path must never
+            # risk a secret reaching the log (TECH.md).
+            logger.warning(
+                "failed to delete message chat_id=%s message_id=%s (%s)",
+                chat_id,
+                message_id,
+                type(exc).__name__,
+            )
+        else:
+            deleted += 1
+    return deleted, attempted
 
 
 async def _ask_question(
@@ -727,7 +813,7 @@ async def _ask_question(
         question = await interviewer.next_question(session.interview, answer)
     except (GeminiApiError, TelegramApiError):
         logger.exception("interviewer failed to ask chat_id=%s", chat_id)
-        await _send(client, chat_id, INTERVIEW_RETRY_MSG)
+        await _send(client, session, INTERVIEW_RETRY_MSG)
         return False
 
     if session.phase is not Phase.INTERVIEW:
@@ -738,7 +824,7 @@ async def _ask_question(
         chat_id,
         session.interview.next_question_number,
     )
-    if not await _send(client, chat_id, question):
+    if not await _send(client, session, question):
         return False
     # Only now is it the question the user is answering; stamping the send time
     # lets the handler reject messages that were already in flight.
@@ -770,7 +856,7 @@ async def _deliver_portrait(
     chat_id = session.chat_id
     # Generation takes seconds: say something first, exactly like the photo
     # hold line (the user must never stare at silence mid-pipeline).
-    await _send(client, chat_id, PORTRAIT_HOLD_MSG)
+    await _send(client, session, PORTRAIT_HOLD_MSG)
 
     stored_path = session.photo_local_path
     try:
@@ -782,23 +868,24 @@ async def _deliver_portrait(
         logger.exception(
             "portrait unavailable chat_id=%s path=%r", chat_id, stored_path
         )
-        await _send(client, chat_id, PORTRAIT_FAILURE_MSG)
+        await _send(client, session, PORTRAIT_FAILURE_MSG)
         return
 
     try:
         image = await converter.fuse(portrait, session.photo_mime_type, profile)
     except (GeminiApiError, TelegramApiError):
         logger.exception("converter failed chat_id=%s", chat_id)
-        await _send(client, chat_id, PORTRAIT_FAILURE_MSG)
+        await _send(client, session, PORTRAIT_FAILURE_MSG)
         return
 
     caption = PORTRAIT_CAPTION_TEMPLATE.format(animal=profile.suggested_animal)
     try:
-        await client.send_photo(chat_id=chat_id, image=image, caption=caption)
+        payload = await client.send_photo(chat_id=chat_id, image=image, caption=caption)
     except Exception:
         logger.exception("failed to send portrait chat_id=%s", chat_id)
-        await _send(client, chat_id, PORTRAIT_FAILURE_MSG)
+        await _send(client, session, PORTRAIT_FAILURE_MSG)
         return
+    _record_sent(session, payload)
     logger.info(
         "portrait_delivered chat_id=%s animal=%r bytes=%s",
         chat_id,
@@ -845,17 +932,18 @@ async def _narrate(
         # raw (ValueError/RuntimeError): the conversation path degrades on
         # those too, so a truncated payload can never strand the session.
         logger.exception("narrator failed chat_id=%s", chat_id)
-        await _send(client, chat_id, NARRATOR_FAILURE_MSG)
+        await _send(client, session, NARRATOR_FAILURE_MSG)
         _advance_to_done(session, chat_id)
         return
 
     try:
-        await client.send_voice(chat_id=chat_id, voice=note)
+        payload = await client.send_voice(chat_id=chat_id, voice=note)
     except TelegramApiError:
         logger.exception("narrator upload failed chat_id=%s", chat_id)
-        await _send(client, chat_id, NARRATOR_FAILURE_MSG)
+        await _send(client, session, NARRATOR_FAILURE_MSG)
         _advance_to_done(session, chat_id)
         return
+    _record_sent(session, payload)
     session.voice_note_sent = True
     logger.info(
         "voice_note_delivered chat_id=%s seconds=%s bytes=%s",
@@ -901,10 +989,10 @@ async def _write_script(
         script = await scripter.write_script(profile)
     except (GeminiApiError, TelegramApiError):
         logger.exception("scripter failed chat_id=%s", chat_id)
-        await _send(client, chat_id, SCRIPT_FAILURE_MSG)
+        await _send(client, session, SCRIPT_FAILURE_MSG)
         return
 
-    if not await _send(client, chat_id, script.text):
+    if not await _send(client, session, script.text):
         return
     # Only a narration that reached the chat becomes Phase 6's input: the audio
     # must never say something the user never read.
@@ -946,7 +1034,7 @@ async def _finish_interview(
     )
     await _send(
         client,
-        chat_id,
+        session,
         PROFILE_REVEAL_TEMPLATE.format(
             profile=final_profile.profile,
             animal=final_profile.suggested_animal,
@@ -997,7 +1085,7 @@ async def _handle_answer(
             # Nothing recorded: the pending question stays pending, so
             # resending the same answer cannot duplicate it.
             logger.exception("interviewer failed chat_id=%s", chat_id)
-            await _send(client, chat_id, INTERVIEW_RETRY_MSG)
+            await _send(client, session, INTERVIEW_RETRY_MSG)
             return
         interview.answers.append(InterviewAnswer(question=pending, answer=answer))
         interview.pending_question = None
@@ -1018,7 +1106,7 @@ async def _handle_answer(
         # Nothing recorded: the pending question stays pending, so resending
         # the same answer cannot duplicate it.
         logger.exception("interviewer failed chat_id=%s", chat_id)
-        await _send(client, chat_id, INTERVIEW_RETRY_MSG)
+        await _send(client, session, INTERVIEW_RETRY_MSG)
         return
 
     # The step resolved: record the tentative answer exactly once.
@@ -1029,7 +1117,7 @@ async def _handle_answer(
         final_profile = step.to_profile()
         if final_profile is None:  # contract guard; the validator forbids this
             logger.error("interview_finish_without_profile chat_id=%s", chat_id)
-            await _send(client, chat_id, INTERVIEW_RETRY_MSG)
+            await _send(client, session, INTERVIEW_RETRY_MSG)
             return
         await _finish_interview(
             client, converter, scripter, narrator, session, final_profile
@@ -1039,9 +1127,9 @@ async def _handle_answer(
     question = step.question
     if not question:  # contract guard; the validator forbids this
         logger.error("interview_ask_without_question chat_id=%s", chat_id)
-        await _send(client, chat_id, INTERVIEW_RETRY_MSG)
+        await _send(client, session, INTERVIEW_RETRY_MSG)
         return
-    if await _send(client, chat_id, question):
+    if await _send(client, session, question):
         interview.pending_question = question
         interview.question_sent_at = _now()
 
@@ -1089,7 +1177,7 @@ async def _handle_interview(
             chat_id,
             session.interview.next_question_number,
         )
-        await _send(client, chat_id, f"{INTERVIEW_NUDGE}\n\n{pending}")
+        await _send(client, session, f"{INTERVIEW_NUDGE}\n\n{pending}")
         return
 
     pending = session.interview.pending_question
@@ -1106,7 +1194,7 @@ async def _handle_interview(
             message.date,
             asked_at,
         )
-        await _send(client, chat_id, f"{INTERVIEW_NUDGE}\n\n{pending}")
+        await _send(client, session, f"{INTERVIEW_NUDGE}\n\n{pending}")
         return
 
     await _handle_answer(
@@ -1136,7 +1224,9 @@ async def _handle_portrait(
     chat_id = message.chat.id
     if session.phase != Phase.AWAITING_PHOTO:
         logger.info("portrait_out_of_phase chat_id=%s phase=%s", chat_id, session.phase)
-        await client.send_message(chat_id=chat_id, text=LATER_PHASE_REPLY)
+        _record_sent(
+            session, await client.send_message(chat_id=chat_id, text=LATER_PHASE_REPLY)
+        )
         return
 
     # Which upload kind arrived decides the source resolution, so it belongs in
@@ -1157,7 +1247,7 @@ async def _handle_portrait(
     # be left staring at silence (live finding: one stalled transfer = 38s).
     # ``_send`` (not a bare call) so a failed courtesy line cannot abort the
     # flow and strand the session in ``BOUNCER_CHECK``.
-    await _send(client, chat_id, PHOTO_HOLD_MSG)
+    await _send(client, session, PHOTO_HOLD_MSG)
 
     try:
         image_bytes = await bouncer.fetch_portrait(client, portrait)
@@ -1168,12 +1258,17 @@ async def _handle_portrait(
             "portrait refused at the edge chat_id=%s", chat_id, exc_info=True
         )
         session.clear()
-        await client.send_message(chat_id=chat_id, text=PHOTO_TOO_LARGE_MSG)
+        _record_sent(
+            session,
+            await client.send_message(chat_id=chat_id, text=PHOTO_TOO_LARGE_MSG),
+        )
         return
     except (GeminiApiError, TelegramApiError):
         logger.exception("bouncer failed chat_id=%s", chat_id)
         session.clear()
-        await client.send_message(chat_id=chat_id, text=BOUNCER_RETRY_MSG)
+        _record_sent(
+            session, await client.send_message(chat_id=chat_id, text=BOUNCER_RETRY_MSG)
+        )
         return
 
     if not verdict.accepted:
@@ -1184,7 +1279,9 @@ async def _handle_portrait(
             verdict.observed_subject,
         )
         session.clear()
-        await client.send_message(chat_id=chat_id, text=verdict.message)
+        _record_sent(
+            session, await client.send_message(chat_id=chat_id, text=verdict.message)
+        )
         log_phase_transition(logger, chat_id, Phase.BOUNCER_CHECK, session.phase)
         return
 
@@ -1194,7 +1291,10 @@ async def _handle_portrait(
     except OSError:
         logger.exception("failed to store accepted portrait chat_id=%s", chat_id)
         session.clear()
-        await client.send_message(chat_id=chat_id, text=DISPATCH_FAILURE_MSG)
+        _record_sent(
+            session,
+            await client.send_message(chat_id=chat_id, text=DISPATCH_FAILURE_MSG),
+        )
         return
     session.photo_file_id = portrait.file_id
     session.photo_local_path = stored_path
@@ -1202,7 +1302,9 @@ async def _handle_portrait(
     session.temp_media_path = str(Path(stored_path).parent)
     log_phase_transition(logger, chat_id, session.phase, Phase.AWAITING_INTERVIEW)
     session.phase = Phase.AWAITING_INTERVIEW
-    await client.send_message(chat_id=chat_id, text=verdict.message)
+    _record_sent(
+        session, await client.send_message(chat_id=chat_id, text=verdict.message)
+    )
     # The interview opens straight away: no extra prompt needed after "come in".
     await _ask_question(client, interviewer, session, answer=None)
 
@@ -1215,14 +1317,16 @@ async def _handle_reset(
 ) -> None:
     """Run a full ``/start`` / ``/restart`` reset for one chat; never raises.
 
-    The user's in-process recovery path (Phase 7): purge the chat's own temp
-    media, wipe every field of the session (interview buffers included, back
-    to ``AWAITING_PHOTO``) and answer with the single confirmation+greeting
-    message. A failed purge is logged loudly but the reset completes anyway -
+    The user's in-process recovery path (Phase 7): delete every message the
+    bot itself sent (the user's own messages are the platform's to delete, not
+    ours), purge the chat's own temp media, wipe every field of the session
+    (interview buffers included, back to ``AWAITING_PHOTO``) and answer with the
+    single confirmation+greeting message. Each step degrades independently: a
+    failed deletion or purge is logged loudly but the reset completes anyway -
     the conversation path degrades, and a process restart is never needed.
 
     Args:
-        client: Telegram client for the reply.
+        client: Telegram client for the deletions and the reply.
         session: The sender's session (cleared in place).
         media_root: Root holding the per-chat temp-media directories.
         command: The recognised alias; used only for the log line - both
@@ -1236,6 +1340,15 @@ async def _handle_reset(
         command,
         from_phase,
     )
+    # Delete the bot's own messages first, while the IDs are still tracked
+    # (``session.clear()`` below empties the list). Best-effort: never raises.
+    deleted, attempted = await _delete_sent_messages(client, session)
+    logger.info(
+        "chat_clear chat_id=%s deleted=%s of=%s",
+        chat_id,
+        deleted,
+        attempted,
+    )
     try:
         media_files: int | str = purge_chat_media(media_root, chat_id)
     except (OSError, ValueError):
@@ -1248,7 +1361,9 @@ async def _handle_reset(
     if from_phase is not session.phase:
         log_phase_transition(logger, chat_id, from_phase, session.phase)
     logger.info("session_reset chat_id=%s media_files=%s", chat_id, media_files)
-    await _send(client, chat_id, RESET_REPLY)
+    # Sent (and tracked) last: this reply is kept by its own reset and deleted
+    # by the next one.
+    await _send(client, session, RESET_REPLY)
 
 
 def _install_signal_handlers(shutdown_event: asyncio.Event) -> None:
@@ -1365,14 +1480,20 @@ async def _dispatch_update(
             return
 
         try:
-            await client.send_message(chat_id=update.message.chat.id, text=reply)
+            _record_sent(
+                session,
+                await client.send_message(chat_id=update.message.chat.id, text=reply),
+            )
         except Exception:
             logger.exception(
                 "Failed to send reply to chat_id=%s", update.message.chat.id
             )
             try:
-                await client.send_message(
-                    chat_id=update.message.chat.id, text=DISPATCH_FAILURE_MSG
+                _record_sent(
+                    session,
+                    await client.send_message(
+                        chat_id=update.message.chat.id, text=DISPATCH_FAILURE_MSG
+                    ),
                 )
             except Exception:
                 logger.exception(

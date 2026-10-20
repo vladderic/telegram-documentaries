@@ -185,3 +185,33 @@ class TestVoiceNoteSent:
         first.voice_note_sent = True
 
         assert second.voice_note_sent is False
+
+
+class TestSentMessageIds:
+    """Phase 7 chat-clear slice: the IDs of messages the bot sent, so a
+    reset can delete them (v1.4)."""
+
+    def test_defaults_to_no_tracked_messages(self) -> None:
+        assert SessionState(chat_id=555).sent_message_ids == []
+
+    def test_appends_ids_in_send_order(self) -> None:
+        state = SessionState(chat_id=555, sent_message_ids=[10, 11])
+
+        state.sent_message_ids.append(12)
+
+        assert state.sent_message_ids == [10, 11, 12]
+
+    def test_clear_resets_it(self) -> None:
+        state = SessionState(chat_id=555, sent_message_ids=[10, 11])
+
+        state.clear()
+
+        assert state.sent_message_ids == []
+
+    def test_sessions_do_not_share_the_list(self) -> None:
+        first = SessionState(chat_id=1)
+        second = SessionState(chat_id=2)
+
+        first.sent_message_ids.append(99)
+
+        assert second.sent_message_ids == []
