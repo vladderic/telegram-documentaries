@@ -1317,14 +1317,16 @@ async def _handle_reset(
 ) -> None:
     """Run a full ``/start`` / ``/restart`` reset for one chat; never raises.
 
-    The user's in-process recovery path (Phase 7): purge the chat's own temp
-    media, wipe every field of the session (interview buffers included, back
-    to ``AWAITING_PHOTO``) and answer with the single confirmation+greeting
-    message. A failed purge is logged loudly but the reset completes anyway -
+    The user's in-process recovery path (Phase 7): delete every message the
+    bot itself sent (the user's own messages are the platform's to delete, not
+    ours), purge the chat's own temp media, wipe every field of the session
+    (interview buffers included, back to ``AWAITING_PHOTO``) and answer with the
+    single confirmation+greeting message. Each step degrades independently: a
+    failed deletion or purge is logged loudly but the reset completes anyway -
     the conversation path degrades, and a process restart is never needed.
 
     Args:
-        client: Telegram client for the reply.
+        client: Telegram client for the deletions and the reply.
         session: The sender's session (cleared in place).
         media_root: Root holding the per-chat temp-media directories.
         command: The recognised alias; used only for the log line - both
@@ -1338,6 +1340,15 @@ async def _handle_reset(
         command,
         from_phase,
     )
+    # Delete the bot's own messages first, while the IDs are still tracked
+    # (``session.clear()`` below empties the list). Best-effort: never raises.
+    deleted, attempted = await _delete_sent_messages(client, session)
+    logger.info(
+        "chat_clear chat_id=%s deleted=%s of=%s",
+        chat_id,
+        deleted,
+        attempted,
+    )
     try:
         media_files: int | str = purge_chat_media(media_root, chat_id)
     except (OSError, ValueError):
@@ -1350,6 +1361,8 @@ async def _handle_reset(
     if from_phase is not session.phase:
         log_phase_transition(logger, chat_id, from_phase, session.phase)
     logger.info("session_reset chat_id=%s media_files=%s", chat_id, media_files)
+    # Sent (and tracked) last: this reply is kept by its own reset and deleted
+    # by the next one.
     await _send(client, session, RESET_REPLY)
 
 
