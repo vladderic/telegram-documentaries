@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import signal
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -555,6 +556,120 @@ def _store_photo(
     path = directory / _portrait_filename(mime_type)
     path.write_bytes(image_bytes)
     return str(path)
+
+
+#: The only reset aliases (two hard-wired names, one handler - no command
+#: framework, per the spec's scope cuts).
+_RESET_COMMANDS = frozenset({"start", "restart"})
+
+
+def _normalise_reset_name(token: str) -> str | None:
+    """Normalise one candidate token to a bare command name, or ``None``.
+
+    Shared by both recognition paths: require a leading ``/``, drop exactly
+    that one ``/``, cut at the first ``@`` or whitespace, lowercase. So
+    ``/start@MyBot`` -> ``start`` while ``//start`` -> ``/start`` (never a
+    command) and ``start`` (no slash) is rejected outright.
+    """
+    if not token.startswith("/"):
+        return None
+    core = token[1:]
+    cut = len(core)
+    for index, char in enumerate(core):
+        if char == "@" or char.isspace():
+            cut = index
+            break
+    name = core[:cut].lower()
+    return name or None
+
+
+def parse_reset_command(message: Message) -> Literal["start", "restart"] | None:
+    """Recognise ``/start`` or ``/restart`` in one message (Phase 7).
+
+    Pure, synchronous, regex-free. Returns ``None`` for any message that is
+    not a reset command (including ``text is None``); the returned name is
+    used only for the log line - both values mean the same action.
+
+    Entity path first (schema, no parsing): a ``bot_command`` entity at
+    ``offset == 0`` names the command, bounds-checked so a hostile payload
+    can neither crash the bot nor silently win (out of range == absent,
+    logged with numeric lengths only). The narrow fallback - the first
+    whitespace-delimited token of ``text`` normalised by the same rule -
+    decides whenever the entity path yields no recognised name, so an
+    entity-less client still resets while ``start``/``//start``/``/starting``
+    fall through unchanged.
+    """
+    text = message.text
+    if text is None:
+        return None
+
+    name: str | None = None
+    for entity in message.entities or ():
+        if entity.type != "bot_command" or entity.offset != 0:
+            continue
+        end = entity.offset + entity.length
+        if end > len(text):  # offset/length are >= 0 by schema
+            logger.warning(
+                "reset command entity out of range chat_id=%s offset=%s "
+                "length=%s text_length=%s",
+                message.chat.id,
+                entity.offset,
+                entity.length,
+                len(text),
+            )
+            break  # treated as absent: the fallback decides
+        name = _normalise_reset_name(text[entity.offset : end])
+        break
+
+    if name not in _RESET_COMMANDS:
+        tokens = text.split()
+        name = _normalise_reset_name(tokens[0]) if tokens else None
+
+    if name == "start":
+        return "start"
+    if name == "restart":
+        return "restart"
+    return None
+
+
+def purge_chat_media(media_root: str | Path, chat_id: int) -> int:
+    """Delete ``media_root/<chat_id>/``; return the number of files removed.
+
+    Deletion is derived from the typed ``chat_id`` and ``media_root`` only -
+    never from a session string (schemas over heuristics, TECH.md).
+
+    Returns:
+        The file count removed; ``0`` when the directory is absent or empty
+        (the common idempotent path - ``FileNotFoundError`` is handled
+        explicitly and never raises).
+
+    Raises:
+        ValueError: When the containment guard trips - both paths are
+        resolved and the target must be a *strict* child of the media root,
+        so a symlinked chat directory pointing outside the root is left
+        intact (logged as an error first).
+        OSError: On any other filesystem failure - fail loud; the reset
+        handler is what degrades.
+    """
+    resolved_root = Path(media_root).resolve()
+    target = (resolved_root / str(chat_id)).resolve()
+    if target == resolved_root or resolved_root not in target.parents:
+        logger.error(
+            "temp media purge refused: target escapes the media root "
+            "chat_id=%s target=%r root=%r",
+            chat_id,
+            target,
+            resolved_root,
+        )
+        raise ValueError(f"purge target {target} is not inside {resolved_root}")
+    try:
+        removed = sum(
+            1 for entry in target.rglob("*") if entry.is_file() or entry.is_symlink()
+        )
+        shutil.rmtree(target)
+    except FileNotFoundError:
+        return 0
+    return removed
 
 
 async def _send(client: TelegramClient, chat_id: int, text: str) -> bool:
