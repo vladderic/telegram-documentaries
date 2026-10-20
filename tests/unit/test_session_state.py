@@ -158,3 +158,30 @@ class TestStoredScript:
         first.script_text = "Only mine."
 
         assert second.script_text is None
+
+
+class TestVoiceNoteSent:
+    """Phase 6: one narration means exactly one voice note per session."""
+
+    def test_defaults_to_no_voice_note(self) -> None:
+        assert SessionState(chat_id=555).voice_note_sent is False
+
+    def test_records_a_delivered_voice_note(self) -> None:
+        state = SessionState(chat_id=555, voice_note_sent=True)
+
+        assert state.voice_note_sent is True
+
+    def test_clear_resets_it(self) -> None:
+        state = SessionState(chat_id=555, voice_note_sent=True)
+
+        state.clear()
+
+        assert state.voice_note_sent is False
+
+    def test_sessions_do_not_share_the_flag(self) -> None:
+        first = SessionState(chat_id=1)
+        second = SessionState(chat_id=2)
+
+        first.voice_note_sent = True
+
+        assert second.voice_note_sent is False

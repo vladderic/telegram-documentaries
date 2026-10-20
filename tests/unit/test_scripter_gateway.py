@@ -26,6 +26,7 @@ from telegram_documentaries.models import (
     SessionState,
     Update,
 )
+from telegram_documentaries.narrator import VoiceNote
 
 PLACEHOLDER_TOKEN = "123456-PLACEHOLDER-TELEGRAM-BOT-TOKEN"
 PLACEHOLDER_GEMINI_KEY = "PLACEHOLDER-GEMINI-API-KEY"
@@ -38,6 +39,7 @@ PROFILE = BehaviouralProfile(
     animal_description="A shameless thief of anything shiny.",
 )
 IMAGE = GeneratedImage(mime_type="image/jpeg", data=b"HYBRID-PORTRAIT-BYTES")
+VOICE = VoiceNote(data=b"MP3-BYTES", mime_type="audio/mpeg", duration=7)
 PORTRAIT_BYTES = b"STORED-PORTRAIT-BYTES"
 DEFAULT_NOW = 1_760_000_000.0
 
@@ -174,6 +176,39 @@ class FakeScripter:
         self.closed = True
 
 
+@dataclass
+class SpeakCall:
+    """One recorded call into the narrator fake."""
+
+    text: str
+
+
+class FakeNarrator:
+    """Scripted, recording stand-in for :class:`NarratorClient`."""
+
+    def __init__(
+        self, results: list[Any] | None = None, log: list[str] | None = None
+    ) -> None:
+        self.queue: list[Any] = list(results if results is not None else [VOICE])
+        self.calls: list[SpeakCall] = []
+        self.closed = False
+        self._log = log
+
+    async def speak(self, text: str) -> VoiceNote:
+        self.calls.append(SpeakCall(text))
+        if self._log is not None:
+            self._log.append("voice")
+        if not self.queue:
+            raise AssertionError("unexpected speak call (script exhausted)")
+        item = self.queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return cast(VoiceNote, item)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 def settings_mock() -> Any:
     settings = MagicMock()
     settings.telegram_bot_token = PLACEHOLDER_TOKEN
@@ -209,12 +244,15 @@ async def run_updates(
     send_photo: AsyncMock,
     converter: FakeConverter,
     media_root: str,
+    narrator: FakeNarrator | None = None,
+    send_voice: AsyncMock | None = None,
 ) -> None:
     """Run ``run_bot`` with every external dependency mocked."""
     mock_client = AsyncMock()
     mock_client.get_updates = AsyncMock(side_effect=updates)
     mock_client.send_message = send
     mock_client.send_photo = send_photo
+    mock_client.send_voice = send_voice or AsyncMock(return_value={"ok": True})
     mock_client.download_file = AsyncMock(return_value=PORTRAIT_BYTES)
     mock_client.close = AsyncMock()
     vision = AsyncMock()
@@ -227,6 +265,9 @@ async def run_updates(
         patch.object(bot_gateway, "InterviewerClient", return_value=interviewer),
         patch.object(bot_gateway, "ConverterClient", return_value=converter),
         patch.object(bot_gateway, "ScripterClient", return_value=scripter),
+        patch.object(
+            bot_gateway, "NarratorClient", return_value=narrator or FakeNarrator()
+        ),
         patch.object(bot_gateway, "_now", return_value=DEFAULT_NOW),
     ):
         await bot_gateway.run_bot(
@@ -528,3 +569,261 @@ class TestScripterLifecycle:
         )
 
         assert scripter.closed is True
+
+    @pytest.mark.asyncio
+    async def test_the_narrator_is_closed_on_shutdown(self, tmp_path: Any) -> None:
+        narrator = FakeNarrator()
+
+        await run_updates(
+            [[]],
+            interviewer=FakeInterviewer(),
+            scripter=FakeScripter(),
+            send=AsyncMock(return_value={"ok": True}),
+            send_photo=AsyncMock(return_value={"ok": True}),
+            converter=FakeConverter(),
+            media_root=str(tmp_path),
+            narrator=narrator,
+        )
+
+        assert narrator.closed is True
+
+
+class TestTheVoiceNoteClosesTheDocumentary:
+    @pytest.mark.asyncio
+    async def test_the_voice_note_is_the_very_last_thing(self, tmp_path: Any) -> None:
+        log: list[str] = []
+        send = AsyncMock(side_effect=recorder(log, "text"))
+        send_voice = AsyncMock(side_effect=recorder(log, "voice"))
+
+        await run_updates(
+            FINISH_UPDATES,
+            interviewer=FakeInterviewer(),
+            scripter=FakeScripter(log=log),
+            send=send,
+            send_photo=AsyncMock(side_effect=recorder(log, "photo")),
+            converter=FakeConverter(),
+            media_root=str(tmp_path),
+            narrator=FakeNarrator(),
+            send_voice=send_voice,
+        )
+
+        # The tail is the contract: reveal, hold line, the image, the words,
+        # then the voice that speaks those very words.
+        assert log[-5:] == ["text", "photo", "script", "text", "voice"]
+        voice = send_voice.await_args_list[0].kwargs["voice"]
+        assert voice.mime_type == "audio/mpeg"
+        assert voice.duration >= 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_voice_does_not_stop_the_words(self, tmp_path: Any) -> None:
+        log: list[str] = []
+        send = AsyncMock(side_effect=recorder(log, "text"))
+
+        await run_updates(
+            FINISH_UPDATES,
+            interviewer=FakeInterviewer(),
+            scripter=FakeScripter(log=log),
+            send=send,
+            send_photo=AsyncMock(side_effect=recorder(log, "photo")),
+            converter=FakeConverter(),
+            media_root=str(tmp_path),
+            narrator=FakeNarrator([GeminiApiError("tts down")], log=log),
+            send_voice=AsyncMock(side_effect=recorder(log, "voice")),
+        )
+
+        texts = [call.kwargs["text"] for call in send.await_args_list]
+        assert NARRATION in texts  # the narration still reached the chat
+        assert bot_gateway.NARRATOR_FAILURE_MSG in texts
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                ValueError("cannot encode empty PCM audio"), id="encode-value-error"
+            ),
+            pytest.param(RuntimeError("lameenc encoder exploded"), id="encoder-error"),
+        ],
+    )
+    async def test_a_raw_encoder_failure_never_crashes_the_loop(
+        self, tmp_path: Any, failure: Exception
+    ) -> None:
+        """Even an untyped encoder failure degrades in character, end to end."""
+        send = AsyncMock(return_value={"ok": True})
+        send_voice = AsyncMock(return_value={"ok": True})
+        narrator = FakeNarrator([failure])
+
+        await run_updates(
+            FINISH_UPDATES,
+            interviewer=FakeInterviewer(),
+            scripter=FakeScripter(),
+            send=send,
+            send_photo=AsyncMock(return_value={"ok": True}),
+            converter=FakeConverter(),
+            media_root=str(tmp_path),
+            narrator=narrator,
+            send_voice=send_voice,
+        )
+
+        texts = [call.kwargs["text"] for call in send.await_args_list]
+        assert NARRATION in texts
+        assert bot_gateway.NARRATOR_FAILURE_MSG in texts
+        send_voice.assert_not_awaited()
+        assert len(narrator.calls) == 1  # no retry
+
+
+class TestOneVoiceNotePerSession:
+    """The Phase 6 headline: a finished session never synthesises twice."""
+
+    @pytest.mark.asyncio
+    async def test_a_message_after_done_gets_the_holding_reply_and_no_second_note(
+        self, tmp_path: Any
+    ) -> None:
+        send = AsyncMock(return_value={"ok": True})
+        send_voice = AsyncMock(return_value={"ok": True})
+        narrator = FakeNarrator()
+        updates = FINISH_UPDATES + [[text_update(7, 555, "one more thing")]]
+
+        await run_updates(
+            updates,
+            interviewer=FakeInterviewer(),
+            scripter=FakeScripter(),
+            send=send,
+            send_photo=AsyncMock(return_value={"ok": True}),
+            converter=FakeConverter(),
+            media_root=str(tmp_path),
+            narrator=narrator,
+            send_voice=send_voice,
+        )
+
+        texts = sent_texts(send)
+        assert texts[-1] == bot_gateway.LATER_PHASE_REPLY
+        # One interview, one synthesis, one upload - the late message starts
+        # nothing.
+        assert send_voice.await_count == 1
+        assert len(narrator.calls) == 1
+
+
+class TestNarrate:
+    """The Phase 6 stage in isolation: the voice from the delivered words."""
+
+    @pytest.mark.asyncio
+    async def test_speaks_the_delivered_text_and_sends_one_voice_note(self) -> None:
+        session = SessionState(chat_id=555, phase=Phase.SCRIPT)
+        session.script_text = NARRATION
+        client = AsyncMock()
+        client.send_message = AsyncMock(return_value={"ok": True})
+        client.send_voice = AsyncMock(return_value={"ok": True})
+        narrator = FakeNarrator()
+
+        await bot_gateway._narrate(client, cast(Any, narrator), session)
+
+        assert session.phase is Phase.DONE
+        assert session.voice_note_sent is True
+        assert [call.text for call in narrator.calls] == [NARRATION]
+        assert client.send_voice.await_args.kwargs == {"chat_id": 555, "voice": VOICE}
+
+    async def test_logs_the_script_to_narrate_transition(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = SessionState(chat_id=555, phase=Phase.SCRIPT)
+        session.script_text = NARRATION
+        client = AsyncMock()
+        client.send_message = AsyncMock(return_value={"ok": True})
+        client.send_voice = AsyncMock(return_value={"ok": True})
+
+        with caplog.at_level("INFO"):
+            await bot_gateway._narrate(client, cast(Any, FakeNarrator()), session)
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("SCRIPT" in m and "NARRATE" in m for m in messages)
+        assert any("NARRATE" in m and "DONE" in m for m in messages)
+        assert any("voice_note_delivered" in m for m in messages)
+
+    async def test_a_failed_tts_degrades_keeps_the_words_and_ends_done(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = SessionState(chat_id=555, phase=Phase.SCRIPT)
+        session.script_text = NARRATION
+        client = AsyncMock()
+        client.send_message = AsyncMock(return_value={"ok": True})
+        narrator = FakeNarrator([GeminiApiError("tts model down")])
+
+        with caplog.at_level("ERROR"):
+            await bot_gateway._narrate(client, cast(Any, narrator), session)
+
+        assert (
+            client.send_message.await_args.kwargs["text"]
+            == bot_gateway.NARRATOR_FAILURE_MSG
+        )
+        # DONE covers "synthesis failed and the pipeline gave up gracefully"
+        # (requirements): a failure can never re-open the pipeline, and the
+        # words survive in the chat.
+        assert session.phase is Phase.DONE
+        assert session.voice_note_sent is False
+        assert session.script_text == NARRATION
+        client.send_voice.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                ValueError("cannot encode empty PCM audio"), id="encode-value-error"
+            ),
+            pytest.param(RuntimeError("lameenc encoder exploded"), id="encoder-error"),
+        ],
+    )
+    async def test_a_raw_encoder_failure_still_degrades_in_character(
+        self, failure: Exception
+    ) -> None:
+        """The raw types the encoder can raise must never strand the session."""
+        session = SessionState(chat_id=555, phase=Phase.SCRIPT)
+        session.script_text = NARRATION
+        client = AsyncMock()
+        client.send_message = AsyncMock(return_value={"ok": True})
+        narrator = FakeNarrator([failure])
+
+        await bot_gateway._narrate(client, cast(Any, narrator), session)
+
+        assert (
+            client.send_message.await_args.kwargs["text"]
+            == bot_gateway.NARRATOR_FAILURE_MSG
+        )
+        assert session.script_text == NARRATION  # the narration text still stands
+        assert session.phase is Phase.DONE
+        assert session.voice_note_sent is False
+        client.send_voice.assert_not_awaited()  # no crash, no retry
+
+    async def test_a_failed_upload_never_sends_a_second_note(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = SessionState(chat_id=555, phase=Phase.SCRIPT)
+        session.script_text = NARRATION
+        client = AsyncMock()
+        client.send_message = AsyncMock(return_value={"ok": True})
+        client.send_voice = AsyncMock(
+            side_effect=raiser(bot_gateway.TelegramApiError("down"))
+        )
+
+        await bot_gateway._narrate(client, cast(Any, FakeNarrator()), session)
+
+        assert session.voice_note_sent is False
+        assert session.phase is Phase.DONE
+        assert (
+            client.send_message.await_args.kwargs["text"]
+            == bot_gateway.NARRATOR_FAILURE_MSG
+        )
+
+    async def test_a_session_with_no_script_is_closed_without_speaking(self) -> None:
+        session = SessionState(chat_id=555, phase=Phase.SCRIPT)
+        client = AsyncMock()
+        client.send_message = AsyncMock(return_value={"ok": True})
+        client.send_voice = AsyncMock(return_value={"ok": True})
+        narrator = FakeNarrator()
+
+        await bot_gateway._narrate(client, cast(Any, narrator), session)
+
+        assert session.phase is Phase.DONE
+        assert session.voice_note_sent is False
+        assert narrator.calls == []
+        client.send_voice.assert_not_awaited()

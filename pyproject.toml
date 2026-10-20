@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 # Runtime dependencies, pinned for reproducibility (TECH.md).
 dependencies = [
     "httpx==0.28.1",
+    "lameenc==1.9.0",
     "pydantic==2.14.1",
     "python-dotenv==1.2.4",
 ]

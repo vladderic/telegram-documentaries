@@ -5,7 +5,7 @@ documentary about you — hybrid human-animal portrait plus a dramatic
 British-documentary voiceover, all inside one Telegram conversation.
 The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 
-> **Status: Phase 5 — Scripter.** The bot boots, long-polls Telegram, and
+> **Status: Phase 6 — Narrator.** The bot boots, long-polls Telegram, and
 > gates every conversation on a portrait photo: a Gemini vision verdict
 > accepts a solo real human (storing the photo and advancing the session) or
 > rejects everything else with a content-specific, in-character quip. An
@@ -13,12 +13,14 @@ The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 > ending in a case-file reveal of the dossier, the suggested animal (a bare
 > species name) and a one-line description of it. The stored photo and the
 > dossier are then fused by Gemini image generation into one hybrid portrait
-> and uploaded to the chat, captioned with the suggested species — and the
-> narrator immediately follows with one paragraph of documentary narration as
-> a plain text message. The remaining stage — Narrator — arrives in a later
-> phase ([`SPECS/ROADMAP.md`](SPECS/ROADMAP.md)).
+> and uploaded to the chat, captioned with the suggested species; the narrator
+> immediately follows with one paragraph of documentary narration as a plain
+> text message, then speaks that same paragraph as a Telegram voice note
+> (Gemini TTS, encoded locally to MP3) — exactly one voice note per session.
+> The remaining phases — resilience and deployment — are described in
+> [`SPECS/ROADMAP.md`](SPECS/ROADMAP.md).
 
-## Pipeline (target architecture)
+## Pipeline
 
 1. User sends `/start`.
 2. User uploads a portrait photo.
@@ -30,8 +32,8 @@ The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
    Telegram.
 6. **Scripter** — one paragraph (~60–90 words) of dramatic documentary
    narration, sent as a plain text message.
-7. **Narrator** — the script synthesised as a Telegram voice note (Gemini
-   TTS).
+7. **Narrator** — the same paragraph synthesised by Gemini TTS and delivered
+   as a Telegram voice note (encoded locally to MP3).
 
 `/start` / `/restart` purge the session and temp media; out-of-order input at
 any stage is handled gracefully and never crashes the bot.
@@ -46,12 +48,16 @@ pip install -e ".[dev]"        # runtime + dev tooling, pinned in pyproject.toml
 cp .env.example .env           # then fill in real values (.env is gitignored)
 ```
 
+The Narrator encodes the TTS PCM to MP3 with
+[`lameenc`](https://pypi.org/project/lameenc/) — a pure pip wheel (no system
+`ffmpeg`) pulled in by the command above, so Telegram plays a real voice note.
+
 Environment variables (loaded from `.env`; never committed, never logged):
 
 | Variable | Purpose |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | **Required.** Token from [@BotFather](https://t.me/BotFather). Startup fails loudly with a clear log if it is missing or empty. |
-| `GEMINI_API_KEY` | **Required.** Key from [Google AI Studio](https://aistudio.google.com/apikey); the Bouncer calls Gemini vision on every photo, the Interviewer calls Gemini text on every question, the Converter calls Gemini image generation when the interview ends, and the Scripter calls Gemini text for the narration. Startup fails loudly if it is missing or empty. |
+| `GEMINI_API_KEY` | **Required.** Key from [Google AI Studio](https://aistudio.google.com/apikey); the Bouncer calls Gemini vision on every photo, the Interviewer calls Gemini text on every question, the Converter calls Gemini image generation when the interview ends, the Scripter calls Gemini text for the narration, and the Narrator calls Gemini TTS to speak it. Startup fails loudly if it is missing or empty. |
 
 ## Run the bot
 
@@ -59,7 +65,7 @@ Environment variables (loaded from `.env`; never committed, never logged):
 python -m telegram_documentaries
 ```
 
-It long-polls Telegram (`getUpdates`) and runs the three stages built so far:
+It long-polls Telegram (`getUpdates`) and runs every stage built so far:
 
 1. **Bouncer** — any text or non-portrait input gets an in-character nudge to
    send a photograph; a portrait gets an immediate hold-line and is then judged
@@ -94,7 +100,16 @@ It long-polls Telegram (`getUpdates`) and runs the three stages built so far:
    sent (words are never rewritten), with a warning in the log. The portrait and
    the narration are independent: if the darkroom jams the narrator still
    speaks, and if the narrator loses his page the portrait still stands. The text
-   is kept on the session for Phase 6 (TTS).
+   is kept on the session for the next stage.
+5. **Narrator** — that exact paragraph is sent verbatim to Gemini TTS
+   (`gemini-3.1-flash-tts-preview`, voice `Charon`) and the returned PCM
+   (24 kHz mono) is encoded locally to MP3 with `lameenc` (no system `ffmpeg`),
+   then uploaded with `sendVoice` as a voice note. The words the user already
+   read are the only source, so the audio can never say anything else; the text
+   and the voice note are independent — if synthesis, encoding or the upload
+   fails, the bot says so in character and the text still stands (no crash, no
+   retry). Exactly one voice note is ever sent per session: later messages get
+   the holding reply.
 
 Shut down gracefully with **Ctrl+C** or **SIGTERM** — even while a long poll is
 in flight. Sessions live in memory only, so a restart means a fresh photo.
@@ -157,6 +172,7 @@ src/telegram_documentaries/
   interviewer.py   # Gemini text client: adaptive questions + dossier/profile
   converter.py     # Gemini image client: photo + dossier → hybrid portrait
   scripter.py      # Gemini text client: dossier → one-paragraph narration
+  narrator.py      # Gemini TTS client: narration → encoded MP3 voice note
   logging_utils.py # async-call timing + phase-transition log helpers
   bot_gateway.py   # entry point: long-polling loop, photo + interview + reveal flows
   __main__.py      # python -m telegram_documentaries

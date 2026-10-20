@@ -18,6 +18,7 @@ import logging
 from typing import Any
 
 import httpx
+from pydantic import AliasChoices, BaseModel, Field, ValidationError
 
 from telegram_documentaries.config import REDACTED
 from telegram_documentaries.logging_utils import log_async_call
@@ -30,6 +31,45 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 class GeminiApiError(Exception):
     """Gemini API failure (typed; the message never contains the API key)."""
+
+
+class InlineAudio(BaseModel):
+    """The inline audio part of a TTS response (untrusted boundary value).
+
+    ``data`` stays base64 exactly as the API sent it; the Narrator decodes it.
+    """
+
+    data: str = Field(min_length=1)
+    mime_type: str = Field(min_length=1)
+
+
+class _InlineData(BaseModel):
+    """The ``inlineData`` payload: base64 data plus its media type."""
+
+    mime_type: str = Field(validation_alias=AliasChoices("mimeType", "mime_type"))
+    data: str = Field(min_length=1)
+
+    model_config = {
+        "extra": "ignore",
+    }
+
+
+class _InlineAudioPart(BaseModel):
+    """One inline-data part of a Gemini TTS response.
+
+    Requests travel as snake_case while the live API answered with camelCase
+    (``inlineData``/``mimeType``); both spellings are accepted so a casing
+    difference can never masquerade as "the model returned no audio" (the
+    Converter parses the same live shape the same way).
+    """
+
+    inline: _InlineData = Field(
+        validation_alias=AliasChoices("inlineData", "inline_data")
+    )
+
+    model_config = {
+        "extra": "ignore",
+    }
 
 
 def generate_url(model: str) -> str:
@@ -194,3 +234,73 @@ class GeminiClient:
                 "Gemini API returned an unexpected response shape (not a JSON object)"
             )
         return decoded
+
+    async def generate_audio(
+        self,
+        text: str,
+        *,
+        voice: str,
+    ) -> InlineAudio:
+        """Run one TTS call and return the inline audio part (Phase 6).
+
+        The text is sent verbatim: the TTS model reads exactly what it is given,
+        and cannot be styled out-of-band (no ``speech_metadata``, no system
+        instruction - both are rejected for this model). A style prefix in the
+        prompt is spoken aloud, so none is added here. The client is
+        constructed with the TTS model as its ``model``.
+
+        Args:
+            text: The narration, exactly as delivered to the user.
+            voice: Prebuilt voice name.
+
+        Returns:
+            The validated inline audio (base64 payload + declared media type).
+
+        Raises:
+            GeminiApiError: On transport/HTTP failures or a response without a
+                usable inline audio part. The API key is redacted from every
+                message.
+        """
+        data = await self._call(
+            {
+                "contents": [{"parts": [{"text": text}]}],
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}
+                    },
+                },
+            }
+        )
+        try:
+            parts = data["candidates"][0]["content"]["parts"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise GeminiApiError(
+                f"Gemini API returned an unexpected TTS response shape "
+                f"({type(exc).__name__})"
+            ) from None
+        if not isinstance(parts, list):
+            raise GeminiApiError(
+                "Gemini API returned an unexpected TTS response shape (no parts)"
+            )
+        # Scan every part: the model may prepend text (or anything else), so
+        # the audio need not be parts[0]. Everything is validated into typed
+        # models at this boundary (TECH.md) - a raw dict never crosses it.
+        for part in parts:
+            try:
+                inline = _InlineAudioPart.model_validate(part)
+            except ValidationError:
+                continue  # a text part, or a part we cannot read: keep looking
+            try:
+                return InlineAudio(
+                    data=inline.inline.data, mime_type=inline.inline.mime_type
+                )
+            except ValidationError as exc:
+                # An empty (or otherwise invalid) payload is a typed failure,
+                # never a raw pydantic error escaping the documented
+                # GeminiApiError contract (mirrors the Converter).
+                raise GeminiApiError(
+                    f"Gemini API returned an unexpected TTS response shape "
+                    f"({type(exc).__name__})"
+                ) from None
+        raise GeminiApiError("Gemini API returned no inline audio part")
