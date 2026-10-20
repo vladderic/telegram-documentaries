@@ -149,6 +149,19 @@ NARRATOR_FAILURE_MSG = (
     "The narrator has gone hoarse - the recording booth swallowed his voice. "
     "His words are above, still in his own hand."
 )
+#: ``/start`` and ``/restart`` confirmation: the archive is wiped (Phase 7).
+RESET_CONFIRM_MSG = (
+    "Very well - the cutting room floor is clear. Every previous take, "
+    "note and frame of you has been struck from the archive."
+)
+#: The greeting a reset chat lands on: straight back to the awaiting-photo
+#: phase, no separate welcome-only path (Phase 7, locked decision).
+GREETING_MSG = (
+    "A fresh subject! The crew has been ready. Send me a photograph and "
+    "we will get you on camera."
+)
+#: The reply to /start and /restart: one message, always this exact text.
+RESET_REPLY = f"{RESET_CONFIRM_MSG}\n\n{GREETING_MSG}"
 
 #: Safety margin for the answer guard. Telegram timestamps carry a 1s
 #: resolution and the bot's clock need not match the server's, so a message is
@@ -549,7 +562,9 @@ def _store_photo(
 
     Returns:
         The path the portrait was written to (held by the session until the
-        pipeline consumes it; purged on ``/restart``, Phase 7).
+        pipeline consumes it; deleted with the chat's whole temp-media
+        directory by ``purge_chat_media`` on ``/start`` / ``/restart``,
+        Phase 7).
     """
     directory = Path(media_root) / str(chat_id)
     directory.mkdir(parents=True, exist_ok=True)
@@ -1113,8 +1128,9 @@ async def _handle_portrait(
     Accept: store media, advance to ``AWAITING_INTERVIEW``, send the
     model-written confirmation and immediately ask the first interview
     question (phase → ``INTERVIEW``). Reject: send the content-specific quip
-    and clear partial state so the user can immediately retry (no ``/start``).
-    Failures: clear state first, then degrade with an in-character reply —
+    and clear partial state so the user can immediately retry - or send
+    ``/start`` / ``/restart`` to reset the whole session outright (Phase 7).
+    Failures: clear state first, then degrade with an in-character reply -
     every branch logs loudly (TECH.md error policy).
     """
     chat_id = message.chat.id
@@ -1191,6 +1207,50 @@ async def _handle_portrait(
     await _ask_question(client, interviewer, session, answer=None)
 
 
+async def _handle_reset(
+    client: TelegramClient,
+    session: SessionState,
+    media_root: str | Path,
+    command: Literal["start", "restart"],
+) -> None:
+    """Run a full ``/start`` / ``/restart`` reset for one chat; never raises.
+
+    The user's in-process recovery path (Phase 7): purge the chat's own temp
+    media, wipe every field of the session (interview buffers included, back
+    to ``AWAITING_PHOTO``) and answer with the single confirmation+greeting
+    message. A failed purge is logged loudly but the reset completes anyway -
+    the conversation path degrades, and a process restart is never needed.
+
+    Args:
+        client: Telegram client for the reply.
+        session: The sender's session (cleared in place).
+        media_root: Root holding the per-chat temp-media directories.
+        command: The recognised alias; used only for the log line - both
+            values mean the same action.
+    """
+    chat_id = session.chat_id
+    from_phase = session.phase
+    logger.info(
+        "reset_command chat_id=%s command=%s from_phase=%s",
+        chat_id,
+        command,
+        from_phase,
+    )
+    try:
+        media_files: int | str = purge_chat_media(media_root, chat_id)
+    except (OSError, ValueError):
+        # Loud, but non-fatal: the session still resets so the user is never
+        # stranded by a disk problem (TECH.md error policy).
+        logger.exception("temp media purge failed chat_id=%s", chat_id)
+        media_files = "unavailable"
+
+    session.clear()
+    if from_phase is not session.phase:
+        log_phase_transition(logger, chat_id, from_phase, session.phase)
+    logger.info("session_reset chat_id=%s media_files=%s", chat_id, media_files)
+    await _send(client, chat_id, RESET_REPLY)
+
+
 def _install_signal_handlers(shutdown_event: asyncio.Event) -> None:
     """Route SIGINT/SIGTERM into a graceful loop exit (Ctrl+C / kill)."""
     loop = asyncio.get_running_loop()
@@ -1257,6 +1317,13 @@ async def _dispatch_update(
             return
 
         session = _session_for(sessions, update.message.chat.id)
+
+        # Phase 7: reset is the very first branch - a reset command can never
+        # become an interview answer or a portrait nudge, from any phase.
+        command = parse_reset_command(update.message)
+        if command is not None:
+            await _handle_reset(client, session, media_root, command)
+            return
 
         if session.phase in INTERVIEW_PHASES:
             # Phase 3: the Interviewer owns this stage. A photo (or any other
@@ -1355,7 +1422,7 @@ async def run_bot(
     scripter = ScripterClient(api_key=settings.gemini_api_key)
     narrator = NarratorClient(api_key=settings.gemini_api_key)
     sessions: dict[int, SessionState] = {}
-    logger.info("Starting Telegram gateway (Phase 6 - Narrator)")
+    logger.info("Starting Telegram gateway (Phase 7 - Resilience)")
 
     try:
         iterations = 0
