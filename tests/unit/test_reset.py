@@ -45,6 +45,42 @@ def text_message(
     return Message.model_validate(payload)
 
 
+def media_message(kind: str, caption: str) -> Message:
+    """A photo or image file carrying only a *caption* — never ``text``.
+
+    ``kind`` is ``"photo"`` or ``"document"``. The raw payload carries
+    Telegram's real ``caption_entities`` markup too: ``Message`` ignores that
+    field (``extra="ignore"``), exactly the scope cut requirements.md
+    prescribes — commands live in ``text``/``entities`` only.
+    """
+    payload: dict[str, Any] = {
+        "message_id": 1,
+        "date": 1_760_000_200,
+        "chat": {"id": 555, "type": "private"},
+        "caption": caption,
+        "caption_entities": [
+            {"type": "bot_command", "offset": 0, "length": len(caption)}
+        ],
+    }
+    if kind == "photo":
+        payload["photo"] = [
+            {
+                "file_id": "p1",
+                "file_unique_id": "u1",
+                "width": 640,
+                "height": 480,
+                "file_size": 4096,
+            }
+        ]
+    else:
+        payload["document"] = {
+            "file_id": "d1",
+            "file_unique_id": "v1",
+            "mime_type": "image/png",
+        }
+    return Message.model_validate(payload)
+
+
 class TestParseResetCommandEntityPath:
     """The primary path: Telegram's own ``bot_command`` markup at offset 0."""
 
@@ -198,6 +234,30 @@ class TestParseResetCommandEdgeCases:
         message = text_message("/start", entities=[entity(0, 6, type_="bold")])
 
         assert bot_gateway.parse_reset_command(message) == "start"
+
+    def test_a_bot_command_entity_on_a_textless_message_is_safe(self) -> None:
+        """Entity markup without ``text``: the ``text is None`` guard decides.
+
+        The entity loop never runs (and never touches ``entity.length`` of a
+        missing string), so a payload Telegram would never send — but which a
+        hostile client could — can neither crash nor reset.
+        """
+        message = text_message(None, entities=[entity(0, 6)])
+
+        assert bot_gateway.parse_reset_command(message) is None
+
+    def test_a_photo_or_file_with_a_command_caption_is_never_a_reset(self) -> None:
+        """requirements.md:132: a caption is not ``text`` — a portrait stays a portrait.
+
+        Both aliases, both media kinds: the caption (and its ignored
+        ``caption_entities`` markup) must never be read as a command.
+        """
+        for kind in ("photo", "document"):
+            for caption in ("/start", "/restart"):
+                message = media_message(kind, caption=caption)
+
+                assert message.text is None
+                assert bot_gateway.parse_reset_command(message) is None
 
 
 class TestPurgeChatMedia:

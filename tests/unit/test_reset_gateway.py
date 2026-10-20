@@ -65,27 +65,31 @@ EXPECTED_GREETING = (
 EXPECTED_REPLY = f"{EXPECTED_CONFIRM}\n\n{EXPECTED_GREETING}"
 
 
-def photo_update(update_id: int, chat_id: int = CHAT_ID) -> Update:
-    return Update.model_validate(
-        {
-            "update_id": update_id,
-            "message": {
-                "message_id": update_id,
-                "date": 1_760_000_100,
-                "chat": {"id": chat_id, "type": "private"},
-                "from": {"id": chat_id, "is_bot": False, "first_name": "Ada"},
-                "photo": [
-                    {
-                        "file_id": f"p{update_id}",
-                        "file_unique_id": f"u{update_id}",
-                        "width": 640,
-                        "height": 480,
-                        "file_size": 4096,
-                    }
-                ],
-            },
-        }
-    )
+def photo_update(
+    update_id: int, chat_id: int = CHAT_ID, *, caption: str | None = None
+) -> Update:
+    message: dict[str, Any] = {
+        "message_id": update_id,
+        "date": 1_760_000_100,
+        "chat": {"id": chat_id, "type": "private"},
+        "from": {"id": chat_id, "is_bot": False, "first_name": "Ada"},
+        "photo": [
+            {
+                "file_id": f"p{update_id}",
+                "file_unique_id": f"u{update_id}",
+                "width": 640,
+                "height": 480,
+                "file_size": 4096,
+            }
+        ],
+    }
+    if caption is not None:
+        # Real Telegram shape: a command caption travels in ``caption_entities``.
+        message["caption"] = caption
+        message["caption_entities"] = [
+            {"type": "bot_command", "offset": 0, "length": len(caption)}
+        ]
+    return Update.model_validate({"update_id": update_id, "message": message})
 
 
 def text_update(
@@ -596,6 +600,45 @@ class TestNotCommandsKeepExistingBehaviour:
         )
 
         assert sent_texts(client) == [EXPECTED_REPLY]
+
+    async def test_a_photo_with_a_command_caption_follows_the_portrait_path(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A command *caption* is never a reset — the photo is a portrait.
+
+        requirements.md:132: ``parse_reset_command`` reads ``text`` only, so
+        the caption falls through to the normal flow: Bouncer verdict, first
+        interview question, portrait stored — no reset reply or log line.
+        """
+        sessions: dict[int, SessionState] = {}
+        interviewer = RecordingInterviewer(questions=["Q1?"])
+        vision = accept_vision()
+
+        with caplog.at_level(logging.INFO):
+            client = await dispatch(
+                photo_update(1, caption="/start"),
+                sessions=sessions,
+                media_root=tmp_path,
+                interviewer=interviewer,
+                vision=vision,
+            )
+
+        # The whole portrait path ran — the caption never intercepted it.
+        assert vision.check_photo.await_count == 1
+        assert sent_texts(client) == [
+            bot_gateway.PHOTO_HOLD_MSG,
+            ACCEPT_VERDICT.message,
+            "Q1?",
+        ]
+        session = sessions[CHAT_ID]
+        assert session.phase is Phase.INTERVIEW
+        assert session.interview.pending_question == "Q1?"
+        assert (tmp_path / str(CHAT_ID) / "portrait.jpg").exists()
+        # And nothing about the message was recognised as a reset.
+        messages = [record.getMessage() for record in caplog.records]
+        assert EXPECTED_REPLY not in sent_texts(client)
+        assert not any("reset_command" in m for m in messages)
+        assert not any("session_reset" in m for m in messages)
 
 
 class TestInterceptionOrder:
