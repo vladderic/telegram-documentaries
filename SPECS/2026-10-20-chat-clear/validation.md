@@ -96,3 +96,17 @@ Drift between spec and build is recorded at the bottom (house practice, see
   dispatch error path record their IDs too (the spec grouped them under "direct
   `send_message` sites"); no site was missed.
 - `SessionState` schema bumped v1.3 → v1.4 for the new `sent_message_ids` field.
+
+## Review notes
+
+- **Lean review pass** (sandbox memory too tight to spawn the reviewer agent;
+  see the plan's memory constraint). Findings:
+  - *Non-blocking:* `sent_message_ids` grows unbounded within a single run
+    (~15 IDs: 5–7 questions plus the pipeline messages) and is emptied on every
+    reset, so the memory cost is negligible. Left as-is; no cap added.
+  - *Non-blocking (resolved):* a duplicate ID would call `deleteMessage` twice;
+    the second call returns "message to delete not found", which
+    `_delete_sent_messages` already catches and skips. No dedupe needed.
+  - *Verified:* every `send_message` / `send_photo` / `send_voice` call site is
+    either inside the tracked `_send` path or wrapped in `_record_sent` (AST
+    sweep) — no untracked send remains.
