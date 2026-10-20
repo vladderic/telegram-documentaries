@@ -9,6 +9,7 @@ style of ``test_scripter_gateway.py``. All secrets are placeholders.
 
 from __future__ import annotations
 
+import itertools
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -918,6 +919,7 @@ async def run_updates(
     vision: AsyncMock | None = None,
     send_photo: AsyncMock | None = None,
     send_voice: AsyncMock | None = None,
+    delete_message: AsyncMock | None = None,
 ) -> None:
     """Run ``run_bot`` with every external dependency mocked (scripter harness)."""
     mock_client = AsyncMock()
@@ -925,6 +927,7 @@ async def run_updates(
     mock_client.send_message = send
     mock_client.send_photo = send_photo or AsyncMock(return_value={"ok": True})
     mock_client.send_voice = send_voice or AsyncMock(return_value={"ok": True})
+    mock_client.delete_message = delete_message or AsyncMock(return_value=True)
     mock_client.download_file = AsyncMock(return_value=PORTRAIT_BYTES)
     mock_client.close = AsyncMock()
 
@@ -1002,6 +1005,57 @@ class TestFullLoop:
             if "Starting Telegram gateway" in record.getMessage()
         ]
         assert starts == ["Starting Telegram gateway (Phase 7 - Resilience)"]
+
+    async def test_a_full_run_then_restart_deletes_every_bot_message(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The TA chat-clear scenario end to end, at mock level: a whole run,
+        then ``/restart`` deletes every message the bot posted in that run."""
+        interviewer = RecordingInterviewer(
+            questions=[f"Q{n}?" for n in range(1, 8)],
+            steps=[
+                InterviewStep(action=InterviewAction.FINISH, **PROFILE.model_dump()),
+            ],
+        )
+        next_id = itertools.count(1000)
+        send = AsyncMock(side_effect=lambda **_: sent_payload(next(next_id)))
+        send_photo = AsyncMock(side_effect=lambda **_: sent_payload(next(next_id)))
+        send_voice = AsyncMock(side_effect=lambda **_: sent_payload(next(next_id)))
+        delete_message = AsyncMock(return_value=True)
+        updates = [
+            [photo_update(1)],
+            [text_update(n, CHAT_ID, f"A{n}") for n in range(2, 9)],
+            [command_update(9, text="/restart")],
+        ]
+
+        with caplog.at_level(logging.INFO):
+            await run_updates(
+                updates,
+                send=send,
+                media_root=str(tmp_path),
+                interviewer=interviewer,
+                send_photo=send_photo,
+                send_voice=send_voice,
+                delete_message=delete_message,
+            )
+
+        # Every bot message sent in the run was deleted on the reset, and the
+        # reset reply itself was NOT deleted (it is tracked for the next reset).
+        deleted_ids = {
+            call.kwargs["message_id"] for call in delete_message.await_args_list
+        }
+        assert deleted_ids
+        reply_calls = [
+            call
+            for call in send.await_args_list
+            if call.kwargs["text"] == EXPECTED_REPLY
+        ]
+        assert len(reply_calls) == 1
+        # Delete happened before the reply was sent (mock call order).
+        delete_message.assert_awaited()
+        assert any(
+            "chat_clear chat_id=555" in record.getMessage() for record in caplog.records
+        )
 
     async def test_the_banner_names_phase_7(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture

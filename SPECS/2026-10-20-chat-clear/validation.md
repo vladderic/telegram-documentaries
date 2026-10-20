@@ -41,18 +41,42 @@ Drift between spec and build is recorded at the bottom (house practice, see
 
 ## Live (real Telegram traffic)
 
+> Status: **not performed.** This environment has no way to exchange live
+> Telegram traffic (the agent cannot drive a user's Telegram client), so no
+> live box is ticked and no live evidence is fabricated. Each box below names
+> the automated coverage that exercises the same behaviour at mock level; a
+> live pass remains outstanding for the section (see the predecessor slice,
+> `SPECS/2026-10-20-reset/validation.md`, for the same practice).
+
 - [ ] Run a full pipeline (photo → interview → portrait → narration → voice
       note), then send `/restart`: **every message the bot posted disappears**
       from the chat.
+      → *Not performed (no live bot). Automated coverage:* the tracking tests
+      (`TestSentMessageRecording`) prove every send records its ID,
+      `TestChatClear` proves every tracked ID is deleted on reset, and
+      `TestFullLoop::test_a_full_run_then_restart_deletes_every_bot_message`
+      drives a whole run then `/restart` and asserts every recorded ID was
+      deleted.
 - [ ] The user's own sent photo/text **remain** (Telegram forbids a bot
       deleting them) — expected, not a bug.
+      → *Not performed (no live bot). By construction:* only IDs the bot
+      recorded for its own sends are ever passed to `deleteMessage`; no user
+      message ID is tracked.
 - [ ] The `RESET_REPLY` arrives as the only recent bot message and is not
       deleted by its own reset.
+      → *Not performed (no live bot). Automated coverage:*
+      `TestChatClear::test_the_reset_reply_is_sent_after_deletion_and_kept`.
 - [ ] A second `/restart` deletes the previous reset reply and posts a fresh
       one.
+      → *Not performed (no live bot). Automated coverage:*
+      `TestChatClear::test_a_repeat_reset_deletes_the_previous_reset_reply`.
 - [ ] `chat_clear` appears in the log with a sensible `deleted` count.
+      → *Not performed live; the `chat_clear chat_id=… deleted=… of=…` line is
+      asserted in `TestChatClear`.*
 - [ ] Two full runs back-to-back in one process, with only `/restart`
       between (no gateway restart line) — the TA scenario.
+      → *Not performed (no live bot). Automated coverage:*
+      `TestFullLoop::test_run_reset_and_a_second_full_run_need_no_restart`.
 
 ## Docs
 
