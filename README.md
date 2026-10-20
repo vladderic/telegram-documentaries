@@ -5,8 +5,8 @@ documentary about you — hybrid human-animal portrait plus a dramatic
 British-documentary voiceover, all inside one Telegram conversation.
 The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 
-> **Status: Phase 7 (reset slice) — Narrator complete.** The bot boots,
-> long-polls Telegram, and
+> **Status: Phase 7 (reset + chat-clear slices) — Narrator complete.** The bot
+> boots, long-polls Telegram, and
 > gates every conversation on a portrait photo: a Gemini vision verdict
 > accepts a solo real human (storing the photo and advancing the session) or
 > rejects everything else with a content-specific, in-character quip. An
@@ -18,10 +18,10 @@ The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 > immediately follows with one paragraph of documentary narration as a plain
 > text message, then speaks that same paragraph as a Telegram voice note
 > (Gemini TTS, encoded locally to MP3) — exactly one voice note per session.
-> `/start` and `/restart` reset a chat in-process (session state + that chat's
-> temp media) with one confirmation+greeting reply — this is one slice of
-> Phase 7; the remaining resilience slices and deployment are described in
-> [`SPECS/ROADMAP.md`](SPECS/ROADMAP.md).
+> `/start` and `/restart` reset a chat in-process — deleting the bot's own
+> messages and that chat's temp media — with one confirmation+greeting reply.
+> This is one slice of Phase 7; the remaining resilience slices and deployment
+> are described in [`SPECS/ROADMAP.md`](SPECS/ROADMAP.md).
 
 ## Pipeline
 
@@ -38,10 +38,13 @@ The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 7. **Narrator** — the same paragraph synthesised by Gemini TTS and delivered
    as a Telegram voice note (encoded locally to MP3).
 
-`/start` and `/restart` reset the chat in-process: the session goes back to
-the awaiting-photo phase, that chat's own temp-media directory is deleted, and
-one confirmation+greeting message comes back — from any phase, with no bot
-restart. Out-of-order input at any stage is handled gracefully and never
+`/start` and `/restart` reset the chat in-process: every message **the bot
+itself sent** in that chat is deleted, the session goes back to the
+awaiting-photo phase, that chat's own temp-media directory is deleted, and one
+confirmation+greeting message comes back — from any phase, with no bot restart.
+The bot cannot delete the *user's* incoming messages (a Telegram platform
+limit), so those remain; only IDs the bot recorded for its own sends are
+removed. Out-of-order input at any stage is handled gracefully and never
 crashes the bot.
 
 ## Local setup
@@ -117,13 +120,17 @@ It long-polls Telegram (`getUpdates`) and runs every stage built so far:
    retry). Exactly one voice note is ever sent per session: later messages get
    the holding reply.
 6. **Reset** — `/start` or `/restart` at any point resets the chat in-process:
-   the session returns to the awaiting-photo phase and that chat's own
-   temp-media directory is deleted (scoped to the chat, idempotent if already
-   gone), with one confirmation+greeting message in reply. The command is
-   recognised before any stage sees the message — it can never become an
-   interview answer or a portrait nudge — and a failed purge still clears the
-   session, loudly logged. No bot restart is ever needed to recover a stuck
-   session.
+   every message **the bot sent** in that chat is deleted, the session returns
+   to the awaiting-photo phase, and that chat's own temp-media directory is
+   deleted (scoped to the chat, idempotent if already gone), with one
+   confirmation+greeting message in reply. The bot cannot delete the user's own
+   messages (a Telegram platform limit), so those stay; only IDs the bot
+   recorded for its own sends are removed, and only for the current in-memory
+   session. The command is recognised before any stage sees the message — it
+   can never become an interview answer or a portrait nudge — and a failed
+   deletion or purge still clears the session, loudly logged. The reply is sent
+   last and is itself tracked, so a second reset deletes it. No bot restart is
+   ever needed to recover a stuck session.
 
 Shut down gracefully with **Ctrl+C** or **SIGTERM** — even while a long poll is
 in flight. Sessions live in memory only, so a process restart means a fresh

@@ -38,6 +38,14 @@ Technical contract for the project. Every agent and feature spec defers to this.
   state driver — no ad-hoc per-agent state stores. `/start` and `/restart` purge
   the session state and any temporary media for that `chat_id` without
   restarting the process.
+- **Chat clear:** the session tracks the `message_id` of every message the bot
+  itself sends (`SessionState.sent_message_ids`, schema v1.4). Every outbound
+  send funnels through the `TelegramClient` boundary, and a recorded ID is only
+  ever one the API returned for a successful send. Reset deletes those IDs via
+  `TelegramClient.delete_message` (`deleteMessage`, never retried) *before*
+  clearing the session; the user's own incoming messages cannot be deleted (a
+  Telegram platform limit) and are left alone. Deletion is best-effort — a
+  failure is logged loudly and skipped, and the reset always completes.
 
 ## Contracts at boundaries
 
