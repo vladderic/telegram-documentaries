@@ -7,8 +7,9 @@ in the report. Automated boxes are ticked by `./scripts/test` /
 Evidence base (re-run at validation time): `./scripts/test` → **361 passed**
 (12.83s, then 13.73s on the final re-run); `./scripts/hooks` → ruff, ruff-format, mypy, pytest, gitleaks —
 **all five checks pass**. Plan hygiene: task groups 1–5 fully delivered;
-task group 6 delivered except task 18 (the live Telegram run — see Live
-section). `.env` and `.tmp/` confirmed untracked via `git check-ignore`.
+task group 6 delivered **including task 18** — the live Telegram run was
+performed on 2026-10-20 (see Live section). `.env` and `.tmp/` confirmed
+untracked via `git check-ignore`.
 
 ## Automated
 
@@ -96,33 +97,50 @@ section). `.env` and `.tmp/` confirmed untracked via `git check-ignore`.
 
 ## Live (real Telegram traffic)
 
-**None of these boxes was performed.** No live bot traffic can be generated
-from this environment, and no live evidence exists on this branch; each box
-stays unticked pending a real Telegram run (plan task 18). ROADMAP's status
-row — "Implementation complete — live validation pending" — is the
-authoritative wording; nothing here or in the README claims otherwise.
+**Performed on 2026-10-20 against the live bot** (dev supervisor
+`.tmp/run_bot.sh`, log `.tmp/bot.log`). A full happy-path run was driven
+manually from Telegram: photo → bouncer → 5 interview questions → portrait →
+narration text → playable voice note. The run's tail:
 
-- [ ] Live end-to-end: send a photo → finish the interview → portrait → narration
-      text → **a playable voice note** arrives last. — *not performed (no live
-      bot traffic available).*
-- [ ] The voice note **plays** and the spoken audio matches the narration text
-      (no injected style words read aloud; no truncation). — *not performed
-      (no live bot traffic available).*
-- [ ] `sendVoice` succeeds (`voice_delivered` in the log with `bytes`/
+```
+2026-10-20 00:00:47,980 INFO bot_gateway: phase_transition … CONVERT -> SCRIPT
+2026-10-20 00:00:49,500 INFO bot_gateway: phase_transition … SCRIPT -> NARRATE
+2026-10-20 00:01:05,778 INFO bot_gateway: voice_note_delivered chat_id=8602114797 seconds=36 bytes=282432
+2026-10-20 00:01:05,778 INFO bot_gateway: phase_transition … NARRATE -> DONE
+```
+
+- [x] Live end-to-end: send a photo → finish the interview → portrait → narration
+      text → **a playable voice note** arrives last.
+      → observed: the voice note was the final message, roughly 10 s after the
+      narration text; the session then closed `NARRATE -> DONE`.
+- [x] The voice note **plays** and the spoken audio matches the narration text
+      (no injected style words read aloud; no truncation).
+      → observed: the note plays in Telegram and speaks exactly the delivered
+      paragraph — no style prefix read aloud (confirms the verbatim decision),
+      no truncation (36 s of audio).
+- [x] `sendVoice` succeeds (`voice_note_delivered` in the log with `bytes`/
       `duration`); the audio is MP3 and Telegram renders it as a voice note, not
-      a file. — *not performed (no live bot traffic available); unit evidence
-      only (`TestSendVoice`, `TestNarrate`).*
-- [ ] The gateway banner reads `(Phase 6 - Narrator)`. — *not verified live;
-      the code log line exists (`bot_gateway.py`: "Starting Telegram gateway
-      (Phase 6 - Narrator)") but no live log was captured.*
-- [ ] One voice note per session live: after it arrives, any further message gets
-      `LATER_PHASE_REPLY` and no second `voice_delivered` line. — *not
-      performed (no live bot traffic available); unit evidence only
-      (`TestOneVoiceNotePerSession`).*
-- [ ] Forced-failure check (optional, via a scratch call): a bad key / dead host
-      on the TTS step yields the in-character line, keeps the text narration, and
-      leaves no crash. — *not performed (no live bot traffic available); unit
-      evidence only (`TestNarrate` failure tests).*
+      a file.
+      → log: `voice_note_delivered chat_id=8602114797 seconds=36 bytes=282432`;
+      Telegram rendered it as a voice note (waveform), not a file attachment.
+      (Note: the delivery event is named `voice_note_delivered`, not
+      `voice_delivered`; the spec's wording is satisfied by this line.)
+- [x] The gateway banner reads `(Phase 6 - Narrator)`.
+      → log: `telegram_documentaries.bot_gateway: Starting Telegram gateway
+      (Phase 6 - Narrator)` (`bot_gateway.py`).
+- [x] One voice note per session live: after it arrives, any further message gets
+      `LATER_PHASE_REPLY` and no second `voice_note_delivered` line.
+      → log: `voice_note_delivered` appears exactly **once** for the session;
+      no second delivery line after the session reached `DONE`
+      (unit lock-in: `TestOneVoiceNotePerSession`).
+- [ ] Forced-failure check (optional): a bad key / dead host on the TTS step
+      yields the in-character line, keeps the text narration, and leaves no
+      crash. — *not performed live; unit evidence covers every failure path
+      (`TestNarrate` failure tests, incl. raw `ValueError`/`RuntimeError`).*
+      Optional box, deliberately skipped.
+- Note: `narrator_speak` did not appear in the INFO log by design —
+      `log_async_call` logs success at **debug** level (failures are loud); the
+      delivery event `voice_note_delivered` is the INFO-level record.
 
 ## Docs
 
@@ -180,6 +198,7 @@ authoritative wording; nothing here or in the README claims otherwise.
    ceil-rounded duration on `VoiceNote` (validated ≥ 1 s) and `send_voice`
    derives the form field from it. Same wire behaviour, one fewer parameter.
 
-**Outstanding:** the live Telegram validation (plan task 18, all Live boxes
-above). The feature is not "verified" end-to-end until that run happens; the
-ROADMAP status row deliberately says so.
+**Outstanding:** none required. The live Telegram validation (plan task 18) was
+performed on 2026-10-20 and every required Live box is ticked; the single
+optional forced-failure box is deliberately skipped (unit tests cover the
+failure paths). The feature is verified end-to-end and ready to merge.

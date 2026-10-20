@@ -144,6 +144,6 @@ OOM kill, box restart) never leaves it silently offline.
 | 3 — Interviewer | Complete |
 | 4 — Converter | Complete |
 | 5 — Scripter | Complete |
-| 6 — Narrator | Implementation complete — live validation pending |
+| 6 — Narrator | Complete |
 | 7 — Resilience | Not started |
 | 8 — Deployment (zero-cost) | Not started |
