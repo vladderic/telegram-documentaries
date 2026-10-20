@@ -208,6 +208,62 @@ class TestSendMessage:
         assert json.loads(seen[0].content) == {"chat_id": 555, "text": "Hello back"}
 
 
+class TestDeleteMessage:
+    """Phase 7 chat-clear slice: delete a message the bot sent."""
+
+    @pytest.mark.asyncio
+    async def test_posts_chat_id_and_message_id(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"ok": True, "result": True})
+
+        client = make_client(handler)
+        try:
+            await client.delete_message(chat_id=555, message_id=100)
+        finally:
+            await client.close()
+
+        assert seen[0].method == "POST"
+        assert seen[0].url.path == f"/bot{PLACEHOLDER_TOKEN}/deleteMessage"
+        assert json.loads(seen[0].content) == {"chat_id": 555, "message_id": 100}
+        assert len(seen) == 1
+
+    @pytest.mark.asyncio
+    async def test_http_error_is_typed_and_redacts_the_token(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                400, json={"ok": False, "description": "message to delete not found"}
+            )
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(bot_gateway.TelegramApiError) as caught:
+                await client.delete_message(chat_id=555, message_id=100)
+        finally:
+            await client.close()
+
+        assert PLACEHOLDER_TOKEN not in str(caught.value)
+
+    @pytest.mark.asyncio
+    async def test_stalled_delete_is_never_retried(self) -> None:
+        attempts = {"count": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts["count"] += 1
+            raise httpx.TimeoutException("stalled")
+
+        client = make_client(handler)
+        try:
+            with pytest.raises(bot_gateway.TelegramApiError):
+                await client.delete_message(chat_id=555, message_id=100)
+        finally:
+            await client.close()
+
+        assert attempts["count"] == 1
+
+
 class TestDownloadFile:
     @pytest.mark.asyncio
     async def test_resolves_file_path_then_downloads_bytes(self) -> None:

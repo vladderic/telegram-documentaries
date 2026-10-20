@@ -458,6 +458,29 @@ class TelegramClient:
             },
         )
 
+    async def delete_message(self, chat_id: int, message_id: int) -> None:
+        """Delete one message the bot sent (``deleteMessage``; Phase 7).
+
+        A bot may delete its own messages but not a user's incoming ones, so
+        this is only ever called for IDs the bot recorded when it sent them.
+
+        The call is **never retried**: a retry cannot make an already-gone or
+        too-old message deletable, and the reset is best-effort (a failure is
+        logged and skipped by the caller).
+
+        Args:
+            chat_id: Target chat ID.
+            message_id: ID of the bot's own message to remove.
+
+        Raises:
+            TelegramApiError: On transport/HTTP failures, with the bot token
+                redacted.
+        """
+        await self._request(
+            "deleteMessage",
+            payload={"chat_id": chat_id, "message_id": message_id},
+        )
+
     async def download_file(self, file_id: str) -> bytes:
         """Download a Telegram file's raw bytes (``getFile`` + file fetch).
 
@@ -699,6 +722,48 @@ async def _send(client: TelegramClient, chat_id: int, text: str) -> bool:
         logger.exception("failed to send message chat_id=%s", chat_id)
         return False
     return True
+
+
+async def _delete_sent_messages(
+    client: TelegramClient,
+    session: SessionState,
+) -> tuple[int, int]:
+    """Delete every message the bot sent to this chat; never raises (Phase 7).
+
+    Best-effort: Telegram only lets a bot delete its own messages, and a
+    message may already be gone or older than the delete window, so a failure
+    on one ID is logged loudly and skipped - the rest are still deleted. The
+    reset must never be blocked by a stuck deletion.
+
+    Args:
+        client: Telegram client.
+        session: The session whose tracked IDs should be removed (not cleared
+            here - the caller clears it after this returns).
+
+    Returns:
+        ``(deleted, attempted)`` - how many of the tracked IDs were removed
+        and how many were tried.
+    """
+    chat_id = session.chat_id
+    deleted = 0
+    attempted = 0
+    for message_id in session.sent_message_ids:
+        attempted += 1
+        try:
+            await client.delete_message(chat_id=chat_id, message_id=message_id)
+        except TelegramApiError as exc:
+            # Log the failure type, never the exception message: the message
+            # can echo an API description, and the conversation path must never
+            # risk a secret reaching the log (TECH.md).
+            logger.warning(
+                "failed to delete message chat_id=%s message_id=%s (%s)",
+                chat_id,
+                message_id,
+                type(exc).__name__,
+            )
+        else:
+            deleted += 1
+    return deleted, attempted
 
 
 async def _ask_question(

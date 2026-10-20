@@ -289,6 +289,7 @@ def assert_session_cleared(session: SessionState) -> None:
     assert session.interview.pending_question is None
     assert session.interview.profile is None
     assert session.interview.question_sent_at is None
+    assert session.sent_message_ids == []
 
 
 class TestResetCopy:
@@ -303,6 +304,80 @@ class TestResetCopy:
         """Every other ``*_MSG`` constant uses " - ", never an em dash."""
         assert " - " in bot_gateway.RESET_CONFIRM_MSG
         assert "—" not in bot_gateway.RESET_REPLY
+
+
+class TestDeleteSentMessages:
+    """Phase 7 chat-clear slice: best-effort deletion of the bot's messages."""
+
+    async def test_deletes_every_tracked_id_and_returns_counts(self) -> None:
+        session = SessionState(chat_id=CHAT_ID, sent_message_ids=[10, 11, 12])
+        client = new_client()
+
+        deleted, attempted = await bot_gateway._delete_sent_messages(client, session)
+
+        assert (deleted, attempted) == (3, 3)
+        assert [
+            c.kwargs["message_id"] for c in client.delete_message.await_args_list
+        ] == [
+            10,
+            11,
+            12,
+        ]
+        assert all(
+            c.kwargs["chat_id"] == CHAT_ID
+            for c in client.delete_message.await_args_list
+        )
+
+    async def test_a_failure_on_one_id_does_not_stop_the_others(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = SessionState(chat_id=CHAT_ID, sent_message_ids=[10, 11, 12])
+        client = new_client()
+
+        async def flaky(chat_id: int, message_id: int) -> None:
+            if message_id == 11:
+                raise bot_gateway.TelegramApiError("message to delete not found")
+
+        client.delete_message = AsyncMock(side_effect=flaky)
+
+        with caplog.at_level(logging.WARNING):
+            deleted, attempted = await bot_gateway._delete_sent_messages(
+                client, session
+            )
+
+        assert (deleted, attempted) == (2, 3)
+        assert "failed to delete" in caplog.text
+        assert "11" in caplog.text
+        # The other two were still attempted.
+        assert client.delete_message.await_count == 3
+
+    async def test_a_brand_new_chat_deletes_nothing(self) -> None:
+        session = SessionState(chat_id=CHAT_ID)
+        client = new_client()
+
+        deleted, attempted = await bot_gateway._delete_sent_messages(client, session)
+
+        assert (deleted, attempted) == (0, 0)
+        client.delete_message.assert_not_awaited()
+
+    async def test_it_never_raises_and_leaks_no_secrets(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        session = SessionState(chat_id=CHAT_ID, sent_message_ids=[10])
+        client = new_client()
+        client.delete_message = AsyncMock(
+            side_effect=bot_gateway.TelegramApiError(
+                f"Telegram API deleteMessage failed: {PLACEHOLDER_TOKEN}"
+            )
+        )
+
+        with caplog.at_level(logging.DEBUG):
+            deleted, attempted = await bot_gateway._delete_sent_messages(
+                client, session
+            )
+
+        assert (deleted, attempted) == (0, 1)
+        assert PLACEHOLDER_TOKEN not in caplog.text
 
 
 class TestFirstContactAndAliases:
