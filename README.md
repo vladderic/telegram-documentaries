@@ -5,7 +5,8 @@ documentary about you — hybrid human-animal portrait plus a dramatic
 British-documentary voiceover, all inside one Telegram conversation.
 The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 
-> **Status: Phase 6 — Narrator.** The bot boots, long-polls Telegram, and
+> **Status: Phase 7 (reset slice) — Narrator complete.** The bot boots,
+> long-polls Telegram, and
 > gates every conversation on a portrait photo: a Gemini vision verdict
 > accepts a solo real human (storing the photo and advancing the session) or
 > rejects everything else with a content-specific, in-character quip. An
@@ -17,7 +18,9 @@ The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 > immediately follows with one paragraph of documentary narration as a plain
 > text message, then speaks that same paragraph as a Telegram voice note
 > (Gemini TTS, encoded locally to MP3) — exactly one voice note per session.
-> The remaining phases — resilience and deployment — are described in
+> `/start` and `/restart` reset a chat in-process (session state + that chat's
+> temp media) with one confirmation+greeting reply — this is one slice of
+> Phase 7; the remaining resilience slices and deployment are described in
 > [`SPECS/ROADMAP.md`](SPECS/ROADMAP.md).
 
 ## Pipeline
@@ -35,8 +38,11 @@ The full mission lives in [`SPECS/MISSION.md`](SPECS/MISSION.md).
 7. **Narrator** — the same paragraph synthesised by Gemini TTS and delivered
    as a Telegram voice note (encoded locally to MP3).
 
-`/start` / `/restart` purge the session and temp media; out-of-order input at
-any stage is handled gracefully and never crashes the bot.
+`/start` and `/restart` reset the chat in-process: the session goes back to
+the awaiting-photo phase, that chat's own temp-media directory is deleted, and
+one confirmation+greeting message comes back — from any phase, with no bot
+restart. Out-of-order input at any stage is handled gracefully and never
+crashes the bot.
 
 ## Local setup
 
@@ -110,9 +116,18 @@ It long-polls Telegram (`getUpdates`) and runs every stage built so far:
    fails, the bot says so in character and the text still stands (no crash, no
    retry). Exactly one voice note is ever sent per session: later messages get
    the holding reply.
+6. **Reset** — `/start` or `/restart` at any point resets the chat in-process:
+   the session returns to the awaiting-photo phase and that chat's own
+   temp-media directory is deleted (scoped to the chat, idempotent if already
+   gone), with one confirmation+greeting message in reply. The command is
+   recognised before any stage sees the message — it can never become an
+   interview answer or a portrait nudge — and a failed purge still clears the
+   session, loudly logged. No bot restart is ever needed to recover a stuck
+   session.
 
 Shut down gracefully with **Ctrl+C** or **SIGTERM** — even while a long poll is
-in flight. Sessions live in memory only, so a restart means a fresh photo.
+in flight. Sessions live in memory only, so a process restart means a fresh
+photo; recover a stuck chat with `/start` instead of restarting the bot.
 
 ## Development scripts
 
@@ -174,7 +189,7 @@ src/telegram_documentaries/
   scripter.py      # Gemini text client: dossier → one-paragraph narration
   narrator.py      # Gemini TTS client: narration → encoded MP3 voice note
   logging_utils.py # async-call timing + phase-transition log helpers
-  bot_gateway.py   # entry point: long-polling loop, photo + interview + reveal flows
+  bot_gateway.py   # entry point: long-polling loop, photo + interview + reveal flows, /start /restart reset
   __main__.py      # python -m telegram_documentaries
 tests/unit/        # Red/Green test suite
 scripts/           # dev scripts: test, hooks (ground truth, see TECH.md)

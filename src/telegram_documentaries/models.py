@@ -93,6 +93,24 @@ class Document(BaseModel):
     model_config = {"extra": "ignore"}
 
 
+class MessageEntity(BaseModel):
+    """Telegram message entity (trimmed to the fields the pipeline reads).
+
+    ``bot_command`` entities are how a client marks ``/start``/``/restart``
+    (Phase 7); Telegram also sends ``username``, ``language`` and other
+    fields, which are ignored here (TECH.md: typed at the boundary).
+    ``offset``/``length`` index into ``text`` as Unicode code points and are
+    clamped to ``>= 0`` — a hostile payload is rejected loudly rather than
+    carried downstream.
+    """
+
+    type: str
+    offset: int = Field(ge=0)
+    length: int = Field(ge=0)
+
+    model_config = {"extra": "ignore"}
+
+
 class PortraitSource(BaseModel):
     """A message's eligible portrait upload (photo *or* image document).
 
@@ -123,6 +141,10 @@ class Message(BaseModel):
     caption: str | None = None
     photo: Annotated[list[PhotoSize] | None, Field(default=None)] = None
     document: Document | None = None
+    #: Telegram's entity markup for ``text`` (e.g. ``bot_command`` for
+    #: ``/start``). ``None`` when the payload carries none — entity-less
+    #: clients validate exactly as before (Phase 7).
+    entities: list[MessageEntity] | None = None
 
     # Map API alias "from" to from_user; also accept "from_user" if present.
     from_user: User | None = Field(

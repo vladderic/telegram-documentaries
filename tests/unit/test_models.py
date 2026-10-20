@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from telegram_documentaries.models import Update
+from telegram_documentaries.models import MessageEntity, Update
 
 # Realistic getUpdates "result" entries, trimmed to the fields Phase 1 models.
 TEXT_UPDATE: dict[str, object] = {
@@ -139,6 +139,79 @@ class TestParseValidUpdates:
         )
 
         assert update.message is None
+
+
+class TestMessageEntities:
+    """Telegram's entity markup (Phase 7): typed at the boundary, extras ignored."""
+
+    def test_parses_the_telegram_entity_shape(self) -> None:
+        entity = MessageEntity.model_validate(
+            {"type": "bot_command", "offset": 0, "length": 6}
+        )
+
+        assert entity.type == "bot_command"
+        assert entity.offset == 0
+        assert entity.length == 6
+
+    def test_ignores_extra_entity_fields_telegram_sends(self) -> None:
+        entity = MessageEntity.model_validate(
+            {
+                "type": "bot_command",
+                "offset": 0,
+                "length": 6,
+                "username": "MyBot",
+                "language": "en",
+            }
+        )
+
+        assert entity.type == "bot_command"
+        assert entity.offset == 0
+
+    def test_negative_offset_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            MessageEntity.model_validate(
+                {"type": "bot_command", "offset": -1, "length": 6}
+            )
+
+    def test_negative_length_is_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            MessageEntity.model_validate(
+                {"type": "bot_command", "offset": 0, "length": -6}
+            )
+
+    def test_message_accepts_entities_from_a_raw_payload(self) -> None:
+        update = Update.model_validate(
+            {
+                "update_id": 9004,
+                "message": {
+                    "message_id": 44,
+                    "date": 1_760_000_002,
+                    "chat": {"id": 555, "type": "private"},
+                    "text": "/start",
+                    "entities": [{"type": "bot_command", "offset": 0, "length": 6}],
+                },
+            }
+        )
+
+        assert update.message is not None
+        assert update.message.entities is not None
+        assert len(update.message.entities) == 1
+        assert update.message.entities[0].type == "bot_command"
+        assert update.message.entities[0].length == 6
+
+    def test_entities_default_to_none_when_absent(self) -> None:
+        update = Update.model_validate(TEXT_UPDATE)
+
+        assert update.message is not None
+        assert update.message.entities is None
+
+    def test_entity_less_payloads_still_validate_exactly_as_before(self) -> None:
+        """No fixture regression: payloads without entities keep parsing."""
+        for payload in (TEXT_UPDATE, PHOTO_UPDATE, DOCUMENT_UPDATE):
+            update = Update.model_validate(payload)
+
+            assert update.message is not None
+            assert update.message.entities is None
 
 
 class TestRejectMalformedUpdates:

@@ -114,6 +114,17 @@ at-wrong-stage guards across all phases, API-timeout fallbacks.
 - **Acceptance:** reset mid-every-phase starts clean; timeouts produce a
   graceful user-facing response and a loud log; no phase crashes on unexpected
   input.
+- **Implementation (reset slice, `2026-10-20`):** `MessageEntity` /
+  `Message.entities` are typed at the Telegram boundary;
+  `parse_reset_command` (entity-first with a narrow first-token fallback),
+  `purge_chat_media` (scoped to `media_root/<chat_id>/`, containment-guarded,
+  idempotent), the `RESET_CONFIRM_MSG` / `GREETING_MSG` / `RESET_REPLY` copy
+  and `_handle_reset` (never raises; a failed purge still clears the session)
+  in `bot_gateway.py`. The reset is intercepted as the first branch of
+  `_dispatch_update`, so a reset command can never become an interview answer
+  or a portrait nudge; the gateway banner reads `(Phase 7 - Resilience)`.
+  Timeout fallbacks and wrong-payload-at-wrong-stage guards remain pending
+  (separate Phase 7 slices).
 - **Serves:** reset + out-of-order success criteria.
 
 ## Phase 8 — Deployment (zero-cost only)
@@ -145,5 +156,5 @@ OOM kill, box restart) never leaves it silently offline.
 | 4 — Converter | Complete |
 | 5 — Scripter | Complete |
 | 6 — Narrator | Complete |
-| 7 — Resilience | Not started |
+| 7 — Resilience | In progress — reset slice (`/start` / `/restart`) complete; timeout & wrong-payload slices pending |
 | 8 — Deployment (zero-cost) | Not started |
